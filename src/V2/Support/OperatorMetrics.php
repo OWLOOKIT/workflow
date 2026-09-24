@@ -31,14 +31,44 @@ use Workflow\V2\Models\WorkflowTimelineEntry;
 final class OperatorMetrics
 {
     /**
+     * @var array<string, array<string, mixed>>|null
+     */
+    private static ?array $collection = null;
+
+    private static ?CarbonInterface $collectionTime = null;
+
+    /**
+     * Reuse one audit within a collection only; never retain it across jobs.
+     */
+    public static function collectOnce(callable $callback): mixed
+    {
+        if (self::$collection !== null) {
+            return $callback();
+        }
+        self::$collection = [];
+        self::$collectionTime = now();
+        try {
+            return $callback();
+        } finally {
+            self::$collection = null;
+            self::$collectionTime = null;
+        }
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public static function snapshot(?CarbonInterface $now = null, ?string $namespace = null): array
     {
-        $now ??= now();
+        $now = self::$collectionTime ?? $now ?? now();
         $namespace = self::normalizeNamespace($namespace);
 
-        return [
+        $key = json_encode([$namespace, $now->toJSON()], JSON_THROW_ON_ERROR);
+        if (self::$collection !== null && isset(self::$collection[$key])) {
+            return self::$collection[$key];
+        }
+
+        $snapshot = [
             'generated_at' => $now->toJSON(),
             'runs' => self::runMetrics($now, $namespace),
             'tasks' => self::taskMetrics($now, $namespace),
@@ -58,6 +88,10 @@ final class OperatorMetrics
             'matching_role' => MatchingRoleSnapshot::current(),
             'sticky_execution' => self::stickyExecutionMetrics($now, $namespace),
         ];
+        if (self::$collection !== null) {
+            self::$collection[$key] = $snapshot;
+        }
+        return $snapshot;
     }
 
     /**
@@ -613,6 +647,7 @@ final class OperatorMetrics
      */
     private static function projectionMetrics(CarbonInterface $now, ?string $namespace): array
     {
+        $selected = SelectedRunProjectionDrift::metrics($namespace);
         $runSummaries = RunSummaryProjectionDrift::metrics($namespace);
         $oldestMissingRunStartedAt = self::oldestMissingRunSummaryStartedAt($namespace);
 
@@ -626,10 +661,10 @@ final class OperatorMetrics
                     ? 0
                     : (int) $oldestMissingRunStartedAt->diffInMilliseconds($now),
             ],
-            'run_waits' => self::runWaitProjectionMetrics($namespace),
-            'run_timeline_entries' => self::runTimelineProjectionMetrics($namespace),
-            'run_timer_entries' => self::runTimerProjectionMetrics($namespace),
-            'run_lineage_entries' => self::runLineageProjectionMetrics($namespace),
+            'run_waits' => self::runWaitProjectionMetrics($namespace, $selected['waits']),
+            'run_timeline_entries' => self::runTimelineProjectionMetrics($namespace, $selected['history']),
+            'run_timer_entries' => self::runTimerProjectionMetrics($namespace, $selected['timers']),
+            'run_lineage_entries' => self::runLineageProjectionMetrics($namespace, $selected['lineage']),
         ];
     }
 
@@ -661,12 +696,11 @@ final class OperatorMetrics
     /**
      * @return array<string, int|string|null>
      */
-    private static function runWaitProjectionMetrics(?string $namespace): array
+    private static function runWaitProjectionMetrics(?string $namespace, array $drift): array
     {
         $waitModel = self::runWaitModel();
         $summariesWithOpenWaits = self::summariesWithOpenWaits($namespace);
         $missingCurrentOpenWaits = self::missingCurrentOpenWaitProjections($namespace);
-        $drift = SelectedRunProjectionDrift::waitMetrics(namespace: $namespace);
         $orphaned = self::projectionRowsMissingRun($waitModel, $namespace);
 
         return [
@@ -694,11 +728,10 @@ final class OperatorMetrics
     /**
      * @return array<string, int|string|null>
      */
-    private static function runTimelineProjectionMetrics(?string $namespace): array
+    private static function runTimelineProjectionMetrics(?string $namespace, array $drift): array
     {
         $timelineModel = self::runTimelineEntryModel();
         $missingHistoryEvents = self::missingTimelineEventProjections($namespace);
-        $drift = SelectedRunProjectionDrift::timelineMetrics(namespace: $namespace);
         $orphaned = self::orphanedTimelineRows($namespace);
 
         return [
@@ -727,10 +760,9 @@ final class OperatorMetrics
     /**
      * @return array<string, int|string|null>
      */
-    private static function runTimerProjectionMetrics(?string $namespace): array
+    private static function runTimerProjectionMetrics(?string $namespace, array $drift): array
     {
         $timerModel = self::runTimerEntryModel();
-        $drift = SelectedRunProjectionDrift::timerMetrics(namespace: $namespace);
         $orphaned = self::projectionRowsMissingRun($timerModel, $namespace);
 
         return [
@@ -764,10 +796,9 @@ final class OperatorMetrics
     /**
      * @return array<string, int|string|null>
      */
-    private static function runLineageProjectionMetrics(?string $namespace): array
+    private static function runLineageProjectionMetrics(?string $namespace, array $drift): array
     {
         $lineageModel = self::runLineageEntryModel();
-        $drift = SelectedRunProjectionDrift::lineageMetrics(namespace: $namespace);
         $orphaned = self::projectionRowsMissingRun($lineageModel, $namespace);
 
         return [

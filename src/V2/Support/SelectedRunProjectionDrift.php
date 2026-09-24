@@ -9,6 +9,61 @@ use Workflow\V2\Models\WorkflowRun;
 final class SelectedRunProjectionDrift
 {
     /**
+     * Audit all selected-run projections in one bounded pass. Keep the canonical
+     * per-run comparisons: projected counts alone cannot detect corrupt rows.
+     *
+     * @return array<string, array<string, int>>
+     */
+    public static function metrics(?string $namespace = null): array
+    {
+        $metrics = [];
+        foreach (['waits', 'history', 'timers', 'lineage'] as $kind) {
+            $metrics[$kind] = [
+                'runs_with_' . $kind => 0,
+                'projected_runs_with_' . $kind => 0,
+                'missing_runs_with_' . $kind => 0,
+                'stale_projected_runs' => 0,
+            ];
+        }
+        $metrics['timers']['schema_version_mismatch_runs'] = 0;
+
+        self::runQuery([
+            'summary', 'waits', 'timelineEntries', 'timerEntries', 'lineageEntries',
+            'historyEvents', 'commands', 'tasks', 'activityExecutions.attempts',
+            'timers', 'failures', 'updates.command', 'updates.failure',
+            'childLinks.childRun.summary', 'childLinks.childRun.failures',
+            'childLinks.childRun.historyEvents', 'childLinks.childRun.instance.currentRun.summary',
+            'parentLinks.parentRun.summary', 'parentLinks.parentRun.historyEvents',
+            'instance.runs.summary',
+        ], [], null, $namespace)->chunkById(100, static function ($runs) use (&$metrics): void {
+            foreach ($runs as $run) {
+                // Reuse the parent already loaded by this batch when decoding payloads.
+                foreach ($run->commands as $command) {
+                    $command->setRelation('run', $run);
+                }
+                foreach ($run->activityExecutions as $activity) {
+                    $activity->setRelation('run', $run);
+                }
+                $statuses = [
+                    'waits' => SelectedRunSnapshot::waitDriftStatus($run),
+                    'history' => SelectedRunSnapshot::timelineDriftStatus($run),
+                    'timers' => SelectedRunSnapshot::timerDriftStatus($run),
+                    'lineage' => SelectedRunSnapshot::lineageDriftStatus($run),
+                ];
+                foreach ($statuses as $kind => $status) {
+                    $metrics[$kind]['runs_with_' . $kind] += (int) $status['has_canonical'];
+                    $metrics[$kind]['projected_runs_with_' . $kind] += (int) ($status['has_canonical'] && $status['has_projection']);
+                    $metrics[$kind]['missing_runs_with_' . $kind] += (int) $status['missing'];
+                    $metrics[$kind]['stale_projected_runs'] += (int) $status['stale'];
+                }
+                $metrics['timers']['schema_version_mismatch_runs'] += (int) $statuses['timers']['schema_version_mismatch'];
+            }
+        }, 'id');
+
+        return $metrics;
+    }
+
+    /**
      * @param list<string> $runIds
      * @return array{
      *     runs_with_waits: int,
