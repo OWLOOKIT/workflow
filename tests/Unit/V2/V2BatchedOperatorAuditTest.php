@@ -24,13 +24,9 @@ final class V2BatchedOperatorAuditTest extends TestCase
         for ($i = 0; $i < 12; $i++) {
             $stub = WorkflowStub::make(BatchedAuditFixtureWorkflow::class);
             $stub->start();
+            $task = WorkflowTask::query()->where('workflow_run_id', $stub->runId())->sole();
             app()
-                ->call(
-                    [new RunWorkflowTask(WorkflowTask::query()->where(
-                        'workflow_run_id',
-                        $stub->runId()
-                    )->sole()->id), 'handle']
-                );
+                ->call([new RunWorkflowTask($task->id), 'handle']);
             WorkflowRun::query()->whereKey($stub->runId())->update([
                 'namespace' => $i % 2 ? 'school-a' : 'school-b',
             ]);

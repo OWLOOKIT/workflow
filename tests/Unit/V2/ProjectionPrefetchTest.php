@@ -6,6 +6,7 @@ namespace Tests\Unit\V2;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use PHPUnit\Framework\Attributes\DataProvider;
@@ -168,6 +169,13 @@ final class ProjectionPrefetchTest extends TestCase
     private static function attributes(Model $row): array
     {
         $attributes = $row->getAttributes();
+        // PostgreSQL omits trailing fractional zeros on timestamp reads.
+        // Compare the full timestamp value rather than its database spelling.
+        foreach (['created_at', 'updated_at'] as $column) {
+            if (isset($attributes[$column])) {
+                $attributes[$column] = Carbon::parse($attributes[$column])->format('Y-m-d H:i:s.u');
+            }
+        }
         ksort($attributes);
 
         return $attributes;
