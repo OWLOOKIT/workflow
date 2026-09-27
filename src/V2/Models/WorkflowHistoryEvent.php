@@ -13,6 +13,7 @@ use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Support\ConfiguredV2Models;
 use Workflow\V2\Support\ExternalPayloads;
 use Workflow\V2\Support\HistoryEventPayloadContract;
+use Workflow\V2\Support\HistoryRecordedAt;
 use Workflow\V2\Support\MemoPayload;
 
 class WorkflowHistoryEvent extends Model
@@ -34,7 +35,7 @@ class WorkflowHistoryEvent extends Model
     protected $casts = [
         'event_type' => HistoryEventType::class,
         'payload' => 'array',
-        'recorded_at' => 'datetime',
+        'recorded_at' => HistoryRecordedAt::class,
     ];
 
     public function run(): BelongsTo

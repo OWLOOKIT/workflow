@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Support\Carbon;
 use Workflow\Traits\ResolvesStorageConnection;
 use Workflow\V2\Support\ConfiguredV2Models;
+use Workflow\V2\Support\UtcScheduleTimestamp;
 
 class WorkflowRunWait extends Model
 {
@@ -32,9 +33,9 @@ class WorkflowRunWait extends Model
         'external_only' => 'bool',
         'command_sequence' => 'integer',
         'payload' => 'array',
-        'opened_at' => 'datetime',
-        'deadline_at' => 'datetime',
-        'resolved_at' => 'datetime',
+        'opened_at' => UtcScheduleTimestamp::class,
+        'deadline_at' => UtcScheduleTimestamp::class,
+        'resolved_at' => UtcScheduleTimestamp::class,
     ];
 
     public function run(): BelongsTo

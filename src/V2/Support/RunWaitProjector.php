@@ -108,7 +108,7 @@ final class RunWaitProjector
                     RunStatus::Terminated->value => sprintf('Child workflow %s terminated.', $label),
                     default => sprintf('Child workflow %s resolved.', $label),
                 },
-                'resolved_at' => $resolvedAt?->format('Y-m-d H:i:s.u'),
+                'resolved_at' => $resolvedAt === null ? null : UtcScheduleTimestamp::databaseValue($resolvedAt),
                 'task_backed' => true,
                 'task_id' => $task->id,
                 'task_type' => $task->task_type->value,

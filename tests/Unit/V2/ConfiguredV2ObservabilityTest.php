@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit\V2;
 
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Str;
@@ -47,6 +48,40 @@ final class ConfiguredV2ObservabilityTest extends TestCase
         Schema::dropIfExists('configured_workflow_runs');
 
         parent::tearDown();
+    }
+
+    public function testUtcHistoryMigrationIncludesConfiguredTableWithoutRewritingLegacyRows(): void
+    {
+        $this->createConfiguredHistoryEventsTable(includeUtcColumn: false);
+        config()
+            ->set('workflows.v2.history_event_model', ConfiguredWorkflowHistoryEvent::class);
+
+        DB::table('configured_workflow_history_events')->insert([
+            'id' => '01JCONFIGLEGACYHISTORY001',
+            'workflow_run_id' => '01JCONFIGLEGACYRUN000001',
+            'sequence' => 1,
+            'event_type' => HistoryEventType::WorkflowStarted->value,
+            'recorded_at' => '2026-10-25 03:30:00.123456',
+        ]);
+
+        $migration = require __DIR__ . '/../../../src/migrations/2026_09_27_000100_add_utc_recorded_at_to_workflow_history_events.php';
+        $migration->up();
+
+        $this->assertTrue(Schema::hasColumn('configured_workflow_history_events', 'recorded_at_utc'));
+        $legacy = DB::table('configured_workflow_history_events')
+            ->where('id', '01JCONFIGLEGACYHISTORY001')
+            ->first();
+        $this->assertSame('2026-10-25 03:30:00.123456', $legacy->recorded_at);
+        $this->assertNull($legacy->recorded_at_utc);
+
+        $new = ConfiguredWorkflowHistoryEvent::create([
+            'workflow_run_id' => '01JCONFIGLEGACYRUN000001',
+            'sequence' => 2,
+            'event_type' => HistoryEventType::WorkflowStarted,
+            'payload' => [],
+            'recorded_at' => Carbon::parse('2026-10-25T00:30:00.123456Z'),
+        ]);
+        $this->assertSame('2026-10-25T00:30:00.123456Z', $new->fresh()->recorded_at?->toJSON());
     }
 
     /**
@@ -710,11 +745,13 @@ final class ConfiguredV2ObservabilityTest extends TestCase
         });
     }
 
-    private function createConfiguredHistoryEventsTable(): void
+    private function createConfiguredHistoryEventsTable(bool $includeUtcColumn = true): void
     {
         Schema::dropIfExists('configured_workflow_history_events');
 
-        Schema::create('configured_workflow_history_events', static function (Blueprint $table): void {
+        Schema::create('configured_workflow_history_events', static function (Blueprint $table) use (
+            $includeUtcColumn
+        ): void {
             $table->string('id', 26)
                 ->primary();
             $table->string('workflow_run_id', 26)
@@ -725,6 +762,10 @@ final class ConfiguredV2ObservabilityTest extends TestCase
                 ->nullable();
             $table->timestamp('recorded_at', 6)
                 ->nullable();
+            if ($includeUtcColumn) {
+                $table->dateTime('recorded_at_utc', 6)
+                    ->nullable();
+            }
             $table->timestamps(6);
         });
     }

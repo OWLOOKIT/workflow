@@ -360,6 +360,18 @@ final class ScheduleManager
                 ->lockForUpdate()
                 ->findOrFail($schedule->id);
 
+            // A tick may have selected this occurrence before another trigger
+            // or update changed the schedule. Decide using the locked row.
+            if ($occurrenceTime !== null && (
+                $schedule->next_fire_at === null
+                || UtcScheduleTimestamp::databaseValue($schedule->next_fire_at)
+                    !== UtcScheduleTimestamp::databaseValue($occurrenceTime)
+            )) {
+                self::recordSkip($schedule, 'stale_occurrence', $context);
+
+                return new ScheduleTriggerResult('skipped', null, null, 'stale_occurrence');
+            }
+
             if (! $schedule->status->allowsTrigger()) {
                 self::recordSkip($schedule, 'status_not_triggerable', $context);
 
@@ -503,7 +515,7 @@ final class ScheduleManager
 
         // Phase 2: evaluate due schedules.
         // DateTime query bindings otherwise lose the model's fractional precision.
-        $dueAt = (new WorkflowSchedule())->fromDateTime(now());
+        $dueAt = UtcScheduleTimestamp::databaseValue(now());
         $due = self::fairScheduleBatch(WorkflowSchedule::query()
             ->where('status', ScheduleStatus::Active->value)
             ->whereNotNull('next_fire_at')

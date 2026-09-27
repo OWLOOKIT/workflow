@@ -9,6 +9,7 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Workflow\Traits\ResolvesStorageConnection;
 use Workflow\V2\Support\ConfiguredV2Models;
+use Workflow\V2\Support\UtcScheduleTimestamp;
 
 class WorkflowTimelineEntry extends Model
 {
@@ -28,7 +29,7 @@ class WorkflowTimelineEntry extends Model
         'sequence' => 'integer',
         'command_sequence' => 'integer',
         'payload' => 'array',
-        'recorded_at' => 'datetime',
+        'recorded_at' => UtcScheduleTimestamp::class,
     ];
 
     public function run(): BelongsTo
