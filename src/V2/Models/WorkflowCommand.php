@@ -513,7 +513,9 @@ class WorkflowCommand extends Model
 
         $namespace = null;
 
-        if ($this->relationLoaded('run') && $this->run instanceof WorkflowRun) {
+        if ($this->relationLoaded('run')
+            && $this->run instanceof WorkflowRun
+            && array_key_exists('namespace', $this->run->getAttributes())) {
             $namespace = is_string($this->run->namespace) ? $this->run->namespace : null;
         } elseif ($this->workflow_run_id !== null) {
             $namespace = ConfiguredV2Models::query('run_model', WorkflowRun::class)

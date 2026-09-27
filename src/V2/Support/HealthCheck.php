@@ -17,7 +17,6 @@ final class HealthCheck
      */
     public static function snapshot(?CarbonInterface $now = null, ?string $namespace = null): array
     {
-        $now ??= now();
         $metrics = OperatorMetrics::snapshot($now, $namespace);
         $checks = [
             self::backendCheck($metrics['backend'] ?? []),
@@ -45,7 +44,7 @@ final class HealthCheck
         $status = self::status($checks);
 
         return [
-            'generated_at' => $metrics['generated_at'] ?? $now->toJSON(),
+            'generated_at' => $metrics['generated_at'] ?? ($now ?? now())->toJSON(),
             'status' => $status,
             'healthy' => $status !== 'error',
             'checks' => $checks,

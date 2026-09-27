@@ -60,7 +60,7 @@ final class OperatorMetrics
      */
     public static function snapshot(?CarbonInterface $now = null, ?string $namespace = null): array
     {
-        $now = self::$collectionTime ?? $now ?? now();
+        $now = $now ?? self::$collectionTime ?? now();
         $namespace = self::normalizeNamespace($namespace);
 
         $key = json_encode([$namespace, $now->toJSON()], JSON_THROW_ON_ERROR);
