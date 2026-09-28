@@ -2631,20 +2631,28 @@ final class WorkflowStub
                 return;
             }
 
-            /** @var WorkflowCommand $command */
-            $command = WorkflowCommand::record($instance, $run, $this->commandAttributes([
+            $storedExternally = $payloadBlob !== null && ExternalPayloads::isStoredReference($payloadBlob);
+            $commandAttributes = $this->commandAttributes([
                 'command_type' => CommandType::Signal->value,
                 'target_scope' => $this->commandTargetScope(),
                 'status' => CommandStatus::Accepted->value,
                 'outcome' => CommandOutcome::SignalReceived->value,
-                ...($payloadBlob !== null && ExternalPayloads::isStoredReference($payloadBlob)
+                ...($storedExternally
                     ? [
                         'payload_codec' => $signalCodec,
                         'payload' => $payloadBlob,
                     ]
                     : $this->signalCommandPayloadAttributes($name, $arguments, [], $signalCodec)),
                 'accepted_at' => now(),
-            ]));
+            ]);
+            if ($storedExternally) {
+                $commandAttributes['context'] = array_merge($commandAttributes['context'], [
+                    'signal_name' => $name,
+                ]);
+            }
+
+            /** @var WorkflowCommand $command */
+            $command = WorkflowCommand::record($instance, $run, $commandAttributes);
 
             $signalWaitId = $bufferedSignalSummary instanceof WorkflowRunSummary
                 ? SignalWaits::bufferedWaitIdForCommandId($command->id)

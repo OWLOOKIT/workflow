@@ -168,6 +168,12 @@ class WorkflowCommand extends Model
 
     public function targetName(): ?string
     {
+        if (is_string($this->payload) && ExternalPayloads::isStoredReference($this->payload)) {
+            $name = $this->commandContext()['signal_name'] ?? null;
+
+            return is_string($name) && $name !== '' ? $name : null;
+        }
+
         $payload = $this->payloadData();
 
         if (! is_array($payload)) {
