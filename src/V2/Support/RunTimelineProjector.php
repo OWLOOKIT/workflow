@@ -136,6 +136,32 @@ final class RunTimelineProjector
     }
 
     /**
+     * Refresh a terminal event after its worker command snapshot changes,
+     * without loading or pruning the rest of a completed run's timeline.
+     */
+    public static function projectWorkerTerminalEvent(
+        WorkflowRun $run,
+        WorkflowHistoryEvent $event,
+    ): WorkflowTimelineEntry {
+        if ($event->workflow_run_id !== $run->id) {
+            throw new \LogicException('Timeline event must belong to the projected workflow run.');
+        }
+
+        $historyEventId = (string) $event->id;
+        $row = self::upsertEntry(
+            $run,
+            self::entryModel(),
+            self::projectionId($run->id, $historyEventId),
+            $historyEventId,
+            HistoryTimeline::fromWorkerTerminalEvent($event),
+        );
+
+        $run->unsetRelation('timelineEntries');
+
+        return $row;
+    }
+
+    /**
      * @return array{source: string, timeline: list<array<string, mixed>>, total_count: int}
      */
     public static function snapshotForRun(WorkflowRun $run, ?int $limit = null): array
