@@ -247,6 +247,15 @@ final class RunTimelineProjector
             unset($values['payload']);
         }
 
+        // PostgreSQL can omit trailing fractional zeroes when returning a
+        // timestamp. Compare the UTC instant before filling the existing row.
+        if (
+            $existing instanceof WorkflowTimelineEntry
+            && self::sameTimestamp($existing->recorded_at, $values['recorded_at'])
+        ) {
+            unset($values['recorded_at']);
+        }
+
         /** @var WorkflowTimelineEntry $row */
         $key = [
             'id' => $projectionId,
@@ -484,5 +493,15 @@ final class RunTimelineProjector
         return is_string($value) && $value !== ''
             ? Carbon::parse($value)
             : null;
+    }
+
+    private static function sameTimestamp(mixed $stored, ?CarbonInterface $projected): bool
+    {
+        if ($stored === null || $projected === null) {
+            return $stored === $projected;
+        }
+
+        return $stored instanceof CarbonInterface
+            && UtcScheduleTimestamp::databaseValue($stored) === UtcScheduleTimestamp::databaseValue($projected);
     }
 }

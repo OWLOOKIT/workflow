@@ -194,6 +194,40 @@ final class ProjectionPrefetchTest extends TestCase
         $this->assertSame('changed', $row->fresh()->payload['status']);
     }
 
+    public function testTimelineReprojectionDoesNotRewriteEquivalentTimestamp(): void
+    {
+        $run = $this->seedRun('timeline-timestamp-format');
+        $entries = [$this->entries()[0]];
+        $entries[0]['recorded_at'] = '2026-09-01T12:00:00.123450Z';
+        $row = RunTimelineProjector::project($run, $entries)[0];
+        $connection = $row->getConnection();
+
+        // PostgreSQL returns a timestamp with trailing fractional zeroes trimmed.
+        $connection->table($row->getTable())
+            ->where('id', $row->getKey())
+            ->update([
+                'recorded_at' => '2026-09-01 12:00:00.12345',
+            ]);
+        $connection->flushQueryLog();
+        $connection->enableQueryLog();
+
+        try {
+            RunTimelineProjector::project($run->fresh(), $entries);
+            $queries = $connection->getQueryLog();
+        } finally {
+            $connection->disableQueryLog();
+        }
+
+        $writes = array_filter($queries, static fn (array $query): bool =>
+            str_starts_with(strtolower($query['query']), 'update')
+            && str_contains($query['query'], $row->getTable()));
+        $this->assertCount(0, $writes);
+
+        $entries[0]['recorded_at'] = '2026-09-01T12:00:00.123451Z';
+        RunTimelineProjector::project($run->fresh(), $entries);
+        $this->assertSame('2026-09-01 12:00:00.123451', $row->fresh()->getRawOriginal('recorded_at'));
+    }
+
     /**
      * @return list<array<string, mixed>>
      */
