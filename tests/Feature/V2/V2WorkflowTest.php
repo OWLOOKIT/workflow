@@ -94,6 +94,8 @@ use Workflow\V2\Support\ActivityCancellation;
 use Workflow\V2\Support\ActivityLease;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
 use Workflow\V2\Support\EmbeddedV2HistoryImport;
+use Workflow\V2\Support\ExternalPayloadReference;
+use Workflow\V2\Support\ExternalPayloads;
 use Workflow\V2\Support\FailureSnapshots;
 use Workflow\V2\Support\HistoryBudget;
 use Workflow\V2\Support\HistoryExport;
@@ -5125,6 +5127,52 @@ final class V2WorkflowTest extends TestCase
             'workflow_id' => 'signal-contract-instance',
             'run_id' => $runId,
         ], $workflow->output());
+    }
+
+    public function testAcceptedExternalSignalCommandRetainsReferenceInsteadOfDecodedArguments(): void
+    {
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(TestUpdateWorkflow::class, 'signal-external-command-instance');
+        $workflow->start();
+        $this->drainReadyTasks();
+        $this->waitFor(static fn (): bool => $workflow->refresh()->status() === 'waiting'
+            && $workflow->summary()?->wait_kind === 'signal');
+
+        $name = str_repeat('S', 2048);
+        $serialized = Serializer::serializeWithCodec('avro', [$name]);
+        $reference = [
+            'codec' => 'avro',
+            'external_storage' => [
+                'schema' => ExternalPayloadReference::SCHEMA,
+                'uri' => 'file:///disposable/signal-external-command',
+                'sha256' => hash('sha256', $serialized),
+                'size_bytes' => strlen($serialized),
+                'codec' => 'avro',
+            ],
+        ];
+        $stored = ExternalPayloads::encodeStoredEnvelope($reference);
+
+        $result = $workflow->attemptSignalWithArguments('name-provided', [
+            'name' => $name,
+        ], 'avro', $stored);
+        $this->assertTrue($result->accepted());
+
+        $command = WorkflowCommand::query()->findOrFail($result->commandId());
+        $signal = WorkflowSignal::query()->where('workflow_command_id', $command->id)->sole();
+        $received = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $workflow->runId())
+            ->where('event_type', HistoryEventType::SignalReceived->value)
+            ->sole();
+
+        $this->assertSame($stored, $command->payload);
+        $this->assertSame($stored, $signal->arguments);
+        $this->assertSame(
+            $reference['external_storage']['sha256'],
+            $received->payload['arguments']['external_storage']['sha256'],
+        );
+        $this->assertLessThan(1024, strlen($command->payload));
+        $this->assertStringNotContainsString($serialized, json_encode($received->payload, JSON_THROW_ON_ERROR));
     }
 
     public function testSignalCommandRejectsInvalidNamedArgumentsAgainstDeclaredContract(): void

@@ -2637,7 +2637,12 @@ final class WorkflowStub
                 'target_scope' => $this->commandTargetScope(),
                 'status' => CommandStatus::Accepted->value,
                 'outcome' => CommandOutcome::SignalReceived->value,
-                ...$this->signalCommandPayloadAttributes($name, $arguments, [], $signalCodec),
+                ...($payloadBlob !== null && ExternalPayloads::isStoredReference($payloadBlob)
+                    ? [
+                        'payload_codec' => $signalCodec,
+                        'payload' => $payloadBlob,
+                    ]
+                    : $this->signalCommandPayloadAttributes($name, $arguments, [], $signalCodec)),
                 'accepted_at' => now(),
             ]));
 
