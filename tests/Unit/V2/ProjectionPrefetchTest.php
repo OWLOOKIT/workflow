@@ -226,6 +226,27 @@ final class ProjectionPrefetchTest extends TestCase
         $entries[0]['recorded_at'] = '2026-09-01T12:00:00.123451Z';
         RunTimelineProjector::project($run->fresh(), $entries);
         $this->assertSame('2026-09-01 12:00:00.123451', $row->fresh()->getRawOriginal('recorded_at'));
+
+        $entries[0]['recorded_at'] = null;
+        RunTimelineProjector::project($run->fresh(), $entries);
+        $this->assertNull($row->fresh()->recorded_at);
+
+        $connection->flushQueryLog();
+        $connection->enableQueryLog();
+        try {
+            RunTimelineProjector::project($run->fresh(), $entries);
+            $queries = $connection->getQueryLog();
+        } finally {
+            $connection->disableQueryLog();
+        }
+        $writes = array_filter($queries, static fn (array $query): bool =>
+            str_starts_with(strtolower($query['query']), 'update')
+            && str_contains($query['query'], $row->getTable()));
+        $this->assertCount(0, $writes);
+
+        $entries[0]['recorded_at'] = '2026-09-01T12:00:00.123452Z';
+        RunTimelineProjector::project($run->fresh(), $entries);
+        $this->assertSame('2026-09-01 12:00:00.123452', $row->fresh()->getRawOriginal('recorded_at'));
     }
 
     /**
