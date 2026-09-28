@@ -83,6 +83,10 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
                 $this->assertSignalResumedMixedGroupCommandSequenceFixture($fixture);
             }
 
+            if (($fixture['id'] ?? null) === 'signal-applied-envelope-cold-replay') {
+                $this->assertSignalAppliedEnvelopeColdReplay($fixture);
+            }
+
             if (($fixture['id'] ?? null) === 'portable-local-activity-attempt-identity-cold-reload') {
                 $this->assertPortableLocalActivityAttemptIdentitySurvivesColdReload($fixture);
             }
@@ -1048,6 +1052,20 @@ final class V2EmbeddedReplayRegressionCorpusTest extends TestCase
         }
 
         $this->assertStepMatches($fixture['expected'], $step, "{$fixture['id']} final outcome");
+    }
+
+    /**
+     * @param array<string, mixed> $fixture
+     */
+    private function assertSignalAppliedEnvelopeColdReplay(array $fixture): void
+    {
+        $this->clearWorkflowState();
+        $run = $this->createRunFromFixture($fixture);
+
+        $this->runReadyWorkflowTask($run);
+
+        $this->assertSame('completed', $run->fresh()->status->value);
+        $this->assertSame($fixture['expected']['result'], $run->fresh()->workflowOutput());
     }
 
     /**
