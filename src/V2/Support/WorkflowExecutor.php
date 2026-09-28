@@ -3013,7 +3013,7 @@ final class WorkflowExecutor
         string $signalWaitId,
         ?array $parallelMetadata = null,
     ): WorkflowHistoryEvent {
-        $value = $this->signalPayloadValue($command, $signalCall->name);
+        $value = $this->signalPayloadValue($run, $command, $signalCall->name);
         $signal = WorkflowSignal::query()
             ->where('workflow_command_id', $command->id)
             ->first();
@@ -3036,13 +3036,19 @@ final class WorkflowExecutor
             MessageStreamCursor::advanceCursor($run, (int) $command->message_sequence, $task);
         }
 
+        $storedValue = ExternalPayloads::externalizeForNamespace(
+            Serializer::serializeWithCodec($run->payload_codec, $value),
+            $run->payload_codec,
+            is_string($run->namespace) ? $run->namespace : null,
+        );
+
         return WorkflowHistoryEvent::record($run, HistoryEventType::SignalApplied, array_filter([
             'workflow_command_id' => $command->id,
             'signal_id' => $signal?->id,
             'signal_name' => $signalCall->name,
             'signal_wait_id' => $signalWaitId,
             'sequence' => $sequence,
-            'value' => Serializer::serializeWithCodec($run->payload_codec, $value),
+            'value' => ExternalPayloads::historyValue($storedValue, $run->payload_codec, $run->namespace),
             ...($parallelMetadata ?? []),
         ], static fn (mixed $payloadValue): bool => $payloadValue !== null), $task, $command);
     }
@@ -3127,7 +3133,11 @@ final class WorkflowExecutor
 
     private function signalValue(WorkflowHistoryEvent $event, ?WorkflowRun $run = null): mixed
     {
-        $serialized = $event->payload['value'] ?? null;
+        $serialized = ExternalPayloads::payloadBlob(
+            $event->payload['value'] ?? null,
+            $run?->payload_codec,
+            $run?->namespace,
+        );
 
         if (! is_string($serialized)) {
             return null;
@@ -3141,13 +3151,25 @@ final class WorkflowExecutor
         ]);
     }
 
-    private function signalPayloadValue(WorkflowCommand $command, string $signalName): mixed
+    private function signalPayloadValue(WorkflowRun $run, WorkflowCommand $command, string $signalName): mixed
     {
-        $arguments = WorkflowPayloadDecoder::commandArguments($command, [
-            'workflow_id' => $command->workflow_instance_id,
-            'run_id' => $command->workflow_run_id,
-            'signal_name' => $signalName,
-        ]);
+        if (is_string($command->payload) && ExternalPayloads::isStoredReference($command->payload)) {
+            $blob = ExternalPayloads::resolveStoredPayload(
+                $command->payload,
+                $command->payload_codec,
+                $run->namespace,
+            );
+            $decoded = Serializer::unserializeWithCodec($command->payload_codec ?? $run->payload_codec, $blob);
+            $arguments = is_array($decoded)
+                ? RunCommandContract::acceptedSignalArguments($run, $signalName, $decoded)
+                : [];
+        } else {
+            $arguments = WorkflowPayloadDecoder::commandArguments($command, [
+                'workflow_id' => $command->workflow_instance_id,
+                'run_id' => $command->workflow_run_id,
+                'signal_name' => $signalName,
+            ]);
+        }
 
         if ($arguments === []) {
             return true;

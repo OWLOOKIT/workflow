@@ -7,6 +7,7 @@ namespace Tests\Feature\V2;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use LogicException;
@@ -20,6 +21,7 @@ use Tests\Fixtures\V2\TestConfiguredContinueSignalWorkflow;
 use Tests\Fixtures\V2\TestConfiguredGreetingActivity;
 use Tests\Fixtures\V2\TestConfiguredGreetingWorkflow;
 use Tests\Fixtures\V2\TestContinueAsNewWorkflow;
+use Tests\Fixtures\V2\TestExternalSignalArgumentsWorkflow;
 use Tests\Fixtures\V2\TestFailingWorkflow;
 use Tests\Fixtures\V2\TestFiberParallelWorkflow;
 use Tests\Fixtures\V2\TestFiberSignalWorkflow;
@@ -63,6 +65,8 @@ use Workflow\Serializers\AvroValueJsonProjection;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\ActivityTaskBridge;
 use Workflow\V2\AsyncWorkflow;
+use Workflow\V2\Contracts\ExternalPayloadStorageDriver;
+use Workflow\V2\Contracts\ExternalPayloadStoragePolicy;
 use Workflow\V2\Contracts\HistoryProjectionRole;
 use Workflow\V2\Enums\ActivityStatus;
 use Workflow\V2\Enums\FailureCategory;
@@ -94,12 +98,15 @@ use Workflow\V2\Support\ActivityCancellation;
 use Workflow\V2\Support\ActivityLease;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
 use Workflow\V2\Support\EmbeddedV2HistoryImport;
+use Workflow\V2\Support\ExternalPayloads;
 use Workflow\V2\Support\FailureSnapshots;
 use Workflow\V2\Support\HistoryBudget;
 use Workflow\V2\Support\HistoryExport;
+use Workflow\V2\Support\LocalFilesystemExternalPayloadStorage;
 use Workflow\V2\Support\MemoPayload;
 use Workflow\V2\Support\MemoUpsertService;
 use Workflow\V2\Support\QueryStateReplayer;
+use Workflow\V2\Support\RunCommandContract;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunSummaryProjector;
 use Workflow\V2\Support\RunSummarySortKey;
@@ -5125,6 +5132,153 @@ final class V2WorkflowTest extends TestCase
             'workflow_id' => 'signal-contract-instance',
             'run_id' => $runId,
         ], $workflow->output());
+    }
+
+    public function testAcceptedExternalSignalCommandRetainsReferenceInsteadOfDecodedArguments(): void
+    {
+        Queue::fake();
+
+        $root = sys_get_temp_dir() . '/dw-external-signal-' . bin2hex(random_bytes(6));
+        $driver = new LocalFilesystemExternalPayloadStorage($root);
+        $this->app->instance(ExternalPayloadStoragePolicy::class, new class(
+            $driver
+        ) implements ExternalPayloadStoragePolicy {
+            public function __construct(
+                private readonly ExternalPayloadStorageDriver $driver
+            ) {
+            }
+
+            public function driverFor(?string $namespace): ?ExternalPayloadStorageDriver
+            {
+                return $this->driver;
+            }
+
+            public function thresholdBytesFor(?string $namespace): ?int
+            {
+                return 32;
+            }
+        });
+
+        try {
+            $workflow = WorkflowStub::make(
+                TestExternalSignalArgumentsWorkflow::class,
+                'signal-external-command-instance'
+            );
+            $workflow->start();
+            $this->drainReadyTasks();
+            $this->waitFor(static fn (): bool => $workflow->refresh()->status() === 'waiting'
+                && $workflow->summary()?->wait_kind === 'signal');
+
+            $name = str_repeat('S', 2048);
+            $serialized = Serializer::serializeWithCodec('avro', [
+                'second' => $name,
+                'first' => 'first-value',
+            ]);
+            $stored = ExternalPayloads::externalizeForNamespace($serialized, 'avro', 'default');
+            $reference = ExternalPayloads::storedEnvelope($stored);
+            $this->assertIsArray($reference);
+
+            $result = $workflow->attemptSignalWithArguments('pair', [
+                'second' => $name,
+                'first' => 'first-value',
+            ], 'avro', $stored);
+            $this->assertTrue($result->accepted());
+
+            $command = WorkflowCommand::query()->findOrFail($result->commandId());
+            $signal = WorkflowSignal::query()->where('workflow_command_id', $command->id)->sole();
+            $received = WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $workflow->runId())
+                ->where('event_type', HistoryEventType::SignalReceived->value)
+                ->sole();
+
+            $this->assertSame($stored, $command->payload);
+            $this->assertSame('pair', $command->targetName());
+            $this->assertSame($stored, $signal->arguments);
+            $this->assertSame(
+                $reference['external_storage']['sha256'],
+                $received->payload['arguments']['external_storage']['sha256'],
+            );
+            $this->assertLessThan(1024, strlen($command->payload));
+            $this->assertStringNotContainsString($serialized, json_encode($received->payload, JSON_THROW_ON_ERROR));
+
+            $this->drainReadyTasks();
+            $this->waitFor(static fn (): bool => $workflow->refresh()->completed());
+            $this->assertSame(['first-value', $name], $workflow->output()['result']);
+            $this->assertNotNull($command->fresh()->applied_at);
+
+            $applied = WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $workflow->runId())
+                ->where('event_type', HistoryEventType::SignalApplied->value)
+                ->sole();
+            $this->assertArrayHasKey('external_storage', $applied->payload['value']);
+            $this->assertStringNotContainsString($name, json_encode($applied->payload, JSON_THROW_ON_ERROR));
+        } finally {
+            File::deleteDirectory($root);
+        }
+    }
+
+    public function testExternalSignalArgumentsRetainAcceptedDefaultsAndVariadicOrder(): void
+    {
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(TestExternalSignalArgumentsWorkflow::class, 'external-signal-contract');
+        $workflow->start();
+        $run = WorkflowRun::query()->findOrFail($workflow->runId());
+
+        $this->assertSame(
+            ['first-value', 'default-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'first' => 'first-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'second-value', 'third-value', 'fourth-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'rest' => ['third-value', 'fourth-value'],
+                'second' => 'second-value',
+                'first' => 'first-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'default-value', 'third-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'first' => 'first-value',
+                'rest' => 'third-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'default-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', ['first-value']),
+        );
+        $this->assertSame(
+            ['first-value', 'second-value', 'third-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'first-value',
+                'second-value',
+                'third-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'second-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'undeclared', ['first-value', 'second-value']),
+        );
+        $this->assertSame(
+            [[
+                'first' => 'first-value',
+            ]],
+            RunCommandContract::acceptedSignalArguments($run, 'undeclared', [
+                'first' => 'first-value',
+            ]),
+        );
+
+        $run->forceFill([
+            'workflow_class' => 'Missing\\ExternalSignalWorkflow',
+            'workflow_type' => 'missing-external-signal-workflow',
+        ])->save();
+        $this->assertSame(
+            ['first-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'undeclared', ['first-value']),
+        );
     }
 
     public function testSignalCommandRejectsInvalidNamedArgumentsAgainstDeclaredContract(): void
