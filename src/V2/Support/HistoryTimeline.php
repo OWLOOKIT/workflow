@@ -98,6 +98,28 @@ final class HistoryTimeline
         return self::mapEvent($event, collect(), collect(), collect(), collect(), collect());
     }
 
+    /**
+     * @return array<string, mixed>
+     */
+    public static function fromWorkerTerminalEvent(WorkflowHistoryEvent $event): array
+    {
+        if (! in_array($event->event_type, [
+            HistoryEventType::WorkflowCompleted,
+            HistoryEventType::WorkflowFailed,
+        ], true)) {
+            throw new \LogicException('Incremental terminal timeline projection requires a completed or failed event.');
+        }
+
+        $failure = FailureSnapshots::forSelfDescribingEvent($event);
+        $failures = is_string($failure['id'] ?? null)
+            ? collect([
+                $failure['id'] => $failure,
+            ])
+            : collect();
+
+        return self::mapEvent($event, collect(), collect(), collect(), collect(), $failures);
+    }
+
     private static function mapEvent(
         WorkflowHistoryEvent $event,
         Collection $commands,

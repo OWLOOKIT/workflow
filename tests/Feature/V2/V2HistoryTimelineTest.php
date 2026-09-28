@@ -51,6 +51,76 @@ final class V2HistoryTimelineTest extends TestCase
         parent::tearDown();
     }
 
+    public function testWorkerTerminalAttributionRefreshesOneTimelineEntryWithoutLosingEarlierEntries(): void
+    {
+        Queue::fake();
+
+        foreach ([
+            [
+                TestGreetingWorkflow::class,
+                'terminal-projection-completed',
+                ['Taylor'],
+                HistoryEventType::WorkflowCompleted,
+            ],
+            [TestFailingWorkflow::class, 'terminal-projection-failed', [], HistoryEventType::WorkflowFailed],
+        ] as [$workflowClass, $workflowId, $arguments, $eventType]) {
+            $workflow = WorkflowStub::make($workflowClass, $workflowId);
+            $workflow->start(...$arguments);
+            $runId = $workflow->runId();
+            $this->assertNotNull($runId);
+            $this->drainReadyTasks();
+            $this->assertSame(
+                $eventType === HistoryEventType::WorkflowCompleted ? 'completed' : 'failed',
+                $workflow->refresh()
+                    ->status(),
+            );
+
+            $run = WorkflowRun::query()->findOrFail($runId);
+            $event = WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $runId)
+                ->where('event_type', $eventType->value)
+                ->firstOrFail();
+            $originalEntries = WorkflowTimelineEntry::query()
+                ->where('workflow_run_id', $runId)
+                ->orderBy('sequence')
+                ->get();
+            $this->assertGreaterThan(1, $originalEntries->count());
+
+            $payload = $event->payload;
+            $this->assertIsArray($payload);
+            $payload['command'] = [
+                'type' => $eventType === HistoryEventType::WorkflowCompleted ? 'complete_workflow' : 'fail_workflow',
+                'source' => 'worker_protocol',
+                'principal_type' => 'auth:token',
+                'principal_id' => 'worker:terminal-projection',
+            ];
+            $event->forceFill([
+                'payload' => $payload,
+            ])->save();
+
+            $this->assertTrue(RunTimelineProjector::driftStatusForRun($run->fresh())['stale']);
+            $this->assertSame(
+                collect(HistoryTimeline::fromHistory($run->fresh()))->firstWhere('id', $event->id),
+                HistoryTimeline::fromWorkerTerminalEvent($event),
+            );
+
+            $projected = RunTimelineProjector::projectWorkerTerminalEvent($run, $event);
+            $this->assertFalse($run->relationLoaded('historyEvents'));
+            $this->assertSame($event->id, $projected->history_event_id);
+            $this->assertSame('worker:terminal-projection', $projected->toTimelinePayload()['command']['principal_id']);
+            $this->assertSame(
+                $originalEntries->pluck('history_event_id')
+                    ->all(),
+                WorkflowTimelineEntry::query()
+                    ->where('workflow_run_id', $runId)
+                    ->orderBy('sequence')
+                    ->pluck('history_event_id')
+                    ->all(),
+            );
+            $this->assertFalse(RunTimelineProjector::driftStatusForRun($run->fresh())['stale']);
+        }
+    }
+
     public function testTimelineProjectsPersistedServiceCallEventsAfterReload(): void
     {
         Queue::fake();
