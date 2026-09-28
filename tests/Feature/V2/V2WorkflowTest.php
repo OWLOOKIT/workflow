@@ -106,6 +106,7 @@ use Workflow\V2\Support\LocalFilesystemExternalPayloadStorage;
 use Workflow\V2\Support\MemoPayload;
 use Workflow\V2\Support\MemoUpsertService;
 use Workflow\V2\Support\QueryStateReplayer;
+use Workflow\V2\Support\RunCommandContract;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunSummaryProjector;
 use Workflow\V2\Support\RunSummarySortKey;
@@ -5214,6 +5215,70 @@ final class V2WorkflowTest extends TestCase
         } finally {
             File::deleteDirectory($root);
         }
+    }
+
+    public function testExternalSignalArgumentsRetainAcceptedDefaultsAndVariadicOrder(): void
+    {
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(TestExternalSignalArgumentsWorkflow::class, 'external-signal-contract');
+        $workflow->start();
+        $run = WorkflowRun::query()->findOrFail($workflow->runId());
+
+        $this->assertSame(
+            ['first-value', 'default-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'first' => 'first-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'second-value', 'third-value', 'fourth-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'rest' => ['third-value', 'fourth-value'],
+                'second' => 'second-value',
+                'first' => 'first-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'default-value', 'third-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'first' => 'first-value',
+                'rest' => 'third-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'default-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', ['first-value']),
+        );
+        $this->assertSame(
+            ['first-value', 'second-value', 'third-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'first-value',
+                'second-value',
+                'third-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'second-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'undeclared', ['first-value', 'second-value']),
+        );
+        $this->assertSame(
+            [[
+                'first' => 'first-value',
+            ]],
+            RunCommandContract::acceptedSignalArguments($run, 'undeclared', [
+                'first' => 'first-value',
+            ]),
+        );
+
+        $run->forceFill([
+            'workflow_class' => 'Missing\\ExternalSignalWorkflow',
+            'workflow_type' => 'missing-external-signal-workflow',
+        ])->save();
+        $this->assertSame(
+            ['first-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'undeclared', ['first-value']),
+        );
     }
 
     public function testSignalCommandRejectsInvalidNamedArgumentsAgainstDeclaredContract(): void

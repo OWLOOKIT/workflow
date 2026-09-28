@@ -20,6 +20,22 @@ use Workflow\V2\Workflow;
         'type' => 'string',
     ],
 ])]
+#[Signal('batch', [
+    [
+        'name' => 'first',
+        'type' => 'string',
+    ],
+    [
+        'name' => 'second',
+        'type' => 'string',
+        'default' => 'default-value',
+    ],
+    [
+        'name' => 'rest',
+        'type' => 'string',
+        'variadic' => true,
+    ],
+])]
 final class TestExternalSignalArgumentsWorkflow extends Workflow
 {
     public function handle(): array
