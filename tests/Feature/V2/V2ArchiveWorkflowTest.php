@@ -4,12 +4,16 @@ declare(strict_types=1);
 
 namespace Tests\Feature\V2;
 
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\Models\WorkflowCommand;
 use Workflow\V2\Models\WorkflowHistoryEvent;
 use Workflow\V2\Models\WorkflowInstance;
 use Workflow\V2\Models\WorkflowRun;
+use Workflow\V2\Models\WorkflowRunSummary;
 use Workflow\V2\Support\HistoryExport;
 use Workflow\V2\Support\HistoryTimeline;
 use Workflow\V2\Support\OperatorMetrics;
@@ -19,6 +23,53 @@ use Workflow\V2\WorkflowStub;
 
 final class V2ArchiveWorkflowTest extends TestCase
 {
+    public function testArchiveCommandStoresAndProjectsTheSameUtcInstantAcrossTimezones(): void
+    {
+        $originalTimezone = date_default_timezone_get();
+        $originalAppTimezone = config('app.timezone');
+        $instants = [
+            '2026-01-15T11:59:00.123456Z',
+            '2026-07-15T11:59:00.123456Z',
+            '2026-03-29T00:59:59.123456Z',
+            '2026-03-29T01:00:01.123456Z',
+            '2026-10-25T00:59:59.123456Z',
+            '2026-10-25T01:00:01.123456Z',
+        ];
+
+        try {
+            foreach (['UTC', 'Europe/Kyiv'] as $timezone) {
+                config()->set('app.timezone', $timezone);
+                date_default_timezone_set($timezone);
+                foreach ($instants as $instant) {
+                    $expected = Carbon::parse($instant, 'UTC');
+                    Carbon::setTestNow($expected);
+                    $run = $this->createRun('archive-timezone-' . Str::ulid(), (string) Str::ulid(), 'completed');
+                    $result = WorkflowStub::loadRun($run->id)->attemptArchive('UTC archive qualification');
+                    $this->assertTrue($result->accepted());
+                    $this->assertSame($expected->format('U.u'), $run->fresh()->archived_at->format('U.u'));
+                    $this->assertSame(
+                        $expected->format('U.u'),
+                        WorkflowRunSummary::query()->findOrFail($run->id)->archived_at->format('U.u')
+                    );
+                    $raw = DB::table('workflow_runs')->where('id', $run->id)->value('archived_at');
+                    $this->assertSame($expected->format('U.u'), Carbon::parse($raw, 'UTC')->format('U.u'));
+
+                    Carbon::setTestNow($expected->copy()->addHour());
+                    $repeat = WorkflowStub::loadRun($run->id)->attemptArchive('repeated archive');
+                    $this->assertSame('archive_not_needed', $repeat->outcome());
+                    $this->assertSame($raw, DB::table('workflow_runs')->where('id', $run->id)->value('archived_at'));
+                    $this->assertSame($result->commandId(), $run->fresh()->archive_command_id);
+                    $this->assertSame('UTC archive qualification', $run->fresh()->archive_reason);
+                }
+            }
+        } finally {
+            Carbon::setTestNow();
+            config()
+                ->set('app.timezone', $originalAppTimezone);
+            date_default_timezone_set($originalTimezone);
+        }
+    }
+
     public function testArchiveMarksClosedRunAndRecordsAuditedHistory(): void
     {
         $run = $this->createRun('archive-terminal-run', '01JARCHIVEFLOWRUN00000001', 'completed');

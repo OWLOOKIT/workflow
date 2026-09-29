@@ -17,6 +17,7 @@ use Workflow\V2\Enums\RunStatus;
 use Workflow\V2\Exceptions\WorkflowOutputCodecUnavailableException;
 use Workflow\V2\Support\ConfiguredV2Models;
 use Workflow\V2\Support\ExternalPayloads;
+use Workflow\V2\Support\UtcScheduleTimestamp;
 
 class WorkflowRun extends Model
 {
@@ -51,7 +52,7 @@ class WorkflowRun extends Model
         'sticky_until' => 'datetime',
         'started_at' => 'datetime',
         'closed_at' => 'datetime',
-        'archived_at' => 'datetime',
+        'archived_at' => UtcScheduleTimestamp::class,
         'details_pruned_at' => 'datetime',
         'last_progress_at' => 'datetime',
         'import_contract_version' => 'integer',
