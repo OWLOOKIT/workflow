@@ -1,0 +1,30 @@
+{
+  "$schema": "https://raw.githubusercontent.com/durable-workflow/.github/main/regression-corpus/evidence-schema.json",
+  "fixture_schema": "durable-workflow.replay-regression/v1",
+  "id": "signal-applied-envelope-cold-replay",
+  "protocol_version": "1.19",
+  "bindings": ["php"],
+  "workflow": {
+    "type": "Tests\\Fixtures\\V2\\TestExternalSignalArgumentsWorkflow",
+    "arguments": [],
+    "payload_codec": "avro"
+  },
+  "history": [
+    {"sequence": 1, "event_type": "WorkflowStarted", "payload": {}},
+    {"sequence": 2, "event_type": "SignalWaitOpened", "payload": {
+      "sequence": 1, "signal_name": "pair", "signal_wait_id": "pair-wait"
+    }},
+    {"sequence": 3, "event_type": "SignalApplied", "payload": {
+      "sequence": 1, "signal_name": "pair", "signal_wait_id": "pair-wait",
+      "value": {
+        "codec": "avro",
+        "blob": "wwHioz3/VYAiNwwEChZmaXJzdC12YWx1ZQoYc2Vjb25kLXZhbHVlAA=="
+      }
+    }}
+  ],
+  "expected": {
+    "completed": true,
+    "result": {"result": ["first-value", "second-value"]},
+    "commands": [{"type": "complete_workflow"}]
+  }
+}

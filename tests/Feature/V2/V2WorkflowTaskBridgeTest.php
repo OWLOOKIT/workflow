@@ -8217,6 +8217,66 @@ final class V2WorkflowTaskBridgeTest extends TestCase
         $this->assertSame(1, $signal->workflow_sequence);
     }
 
+    public function testSignalResumeKeepsExternalArgumentsOutOfAppliedHistory(): void
+    {
+        $driver = new LocalFilesystemExternalPayloadStorage($this->makeStorageRoot());
+        $this->bindExternalPayloadPolicy($driver);
+
+        $run = $this->createWaitingRun();
+        $openTask = $this->createLeasedTask($run);
+        $this->bridge->complete($openTask->id, [[
+            'type' => 'open_signal_wait',
+            'signal_name' => 'advance',
+        ]]);
+
+        $opened = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SignalWaitOpened->value)
+            ->sole();
+        $signalWaitId = $opened->payload['signal_wait_id'];
+        $signal = $this->recordReceivedSignal($run, 'advance', $signalWaitId);
+        $largeValue = str_repeat('S', 2048);
+        $arguments = ExternalPayloads::externalizeForNamespace(
+            Serializer::serializeWithCodec('avro', [$largeValue]),
+            'avro',
+            $run->namespace,
+        );
+        $signal->forceFill([
+            'arguments' => $arguments,
+        ])->save();
+        $signal->command->forceFill([
+            'payload' => $arguments,
+        ])->save();
+
+        $resumeTask = $this->createLeasedTask($run);
+        $resumeTask->forceFill([
+            'payload' => WorkflowTaskPayload::forSignal($signal),
+        ])->save();
+        $result = $this->bridge->complete($resumeTask->id, [[
+            'type' => 'complete_workflow',
+            'result' => Serializer::serialize([
+                'ok' => true,
+            ]),
+        ]]);
+
+        $this->assertTrue($result['completed']);
+        $applied = WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $run->id)
+            ->where('event_type', HistoryEventType::SignalApplied->value)
+            ->sole();
+        $this->assertArrayHasKey('external_storage', $applied->payload['value']);
+        $this->assertStringNotContainsString($largeValue, json_encode($applied->payload, JSON_THROW_ON_ERROR));
+        $this->assertSame(
+            $largeValue,
+            Serializer::unserializeWithCodec('avro', ExternalPayloads::payloadBlob(
+                $applied->payload['value'],
+                'avro',
+                $run->namespace,
+            )),
+        );
+        $this->assertSame(SignalStatus::Applied, $signal->fresh()->status);
+    }
+
     public function testCompletingLeasedTaskAfterSignalArrivesEnqueuesSignalResumeTask(): void
     {
         $run = $this->createWaitingRun();

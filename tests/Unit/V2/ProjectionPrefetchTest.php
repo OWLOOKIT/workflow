@@ -85,6 +85,16 @@ final class ProjectionPrefetchTest extends TestCase
                 count($entries),
                 DB::connection('projection-secondary')->table('custom_projection_rows')->count()
             );
+            if ($projector === RunTimelineProjector::class) {
+                $projector::project($run->fresh(), []);
+                $this->assertSame(
+                    count($entries),
+                    DB::connection('projection-secondary')->table('custom_projection_rows')->count()
+                );
+                $run->forceFill([
+                    'status' => 'completed',
+                ])->save();
+            }
             $projector::project($run->fresh(), []);
             $this->assertSame(0, DB::connection('projection-secondary')->table('custom_projection_rows')->count());
             $this->assertNotNull($original->fresh());
@@ -115,8 +125,8 @@ final class ProjectionPrefetchTest extends TestCase
 
         $reads = array_filter($queries, static fn (array $query): bool =>
             str_starts_with(strtolower($query['query']), 'select') && str_contains($query['query'], $table));
-        // One prefetched row set plus the existing stale-cleanup primary-key snapshot.
-        $this->assertCount(2, $reads);
+        // Active timelines append, so only terminal runs need the stale-cleanup read.
+        $this->assertCount($projector === RunTimelineProjector::class ? 1 : 2, $reads);
         $this->assertSame($expected, array_map(self::attributes(...), $reprojected));
 
         $rows[0]->forceFill([
@@ -132,6 +142,11 @@ final class ProjectionPrefetchTest extends TestCase
         ])->save();
         $otherRun = $this->seedRun('unrelated');
         $otherRows = $projector::project($otherRun, $entries);
+        if ($projector === RunTimelineProjector::class) {
+            $run->forceFill([
+                'status' => 'completed',
+            ])->save();
+        }
 
         $repaired = $projector::project($run->fresh(), $entries);
         $this->assertCount(count($entries), $repaired);
@@ -143,6 +158,96 @@ final class ProjectionPrefetchTest extends TestCase
         $this->assertSame([], $projector::project($run->fresh(), []));
         $this->assertSame(0, $rows[0]->newQuery()->where('workflow_run_id', $run->id)->count());
         $this->assertSame(count($entries), $otherRows[0]->newQuery()->where('workflow_run_id', $otherRun->id)->count());
+    }
+
+    public function testTimelineReprojectionDoesNotRewriteEquivalentJsonPayload(): void
+    {
+        $run = $this->seedRun('timeline-json-order');
+        $entries = [$this->entries()[0]];
+        $row = RunTimelineProjector::project($run, $entries)[0];
+        $payload = $row->payload;
+        $this->assertIsArray($payload);
+        ksort($payload);
+
+        $connection = $row->getConnection();
+        $connection->table($row->getTable())
+            ->where('id', $row->getKey())
+            ->update([
+                'payload' => json_encode($payload, JSON_THROW_ON_ERROR),
+            ]);
+        $connection->flushQueryLog();
+        $connection->enableQueryLog();
+
+        try {
+            RunTimelineProjector::project($run->fresh(), $entries);
+            $queries = $connection->getQueryLog();
+        } finally {
+            $connection->disableQueryLog();
+        }
+
+        $writes = array_filter($queries, static fn (array $query): bool =>
+            str_starts_with(strtolower($query['query']), 'update')
+            && str_contains($query['query'], $row->getTable()));
+        $this->assertCount(0, $writes);
+
+        $entries[0]['status'] = 'changed';
+        RunTimelineProjector::project($run->fresh(), $entries);
+        $this->assertSame('changed', $row->fresh()->payload['status']);
+    }
+
+    public function testTimelineReprojectionDoesNotRewriteEquivalentTimestamp(): void
+    {
+        $run = $this->seedRun('timeline-timestamp-format');
+        $entries = [$this->entries()[0]];
+        $entries[0]['recorded_at'] = '2026-09-01T12:00:00.123450Z';
+        $row = RunTimelineProjector::project($run, $entries)[0];
+        $connection = $row->getConnection();
+
+        // PostgreSQL returns a timestamp with trailing fractional zeroes trimmed.
+        $connection->table($row->getTable())
+            ->where('id', $row->getKey())
+            ->update([
+                'recorded_at' => '2026-09-01 12:00:00.12345',
+            ]);
+        $connection->flushQueryLog();
+        $connection->enableQueryLog();
+
+        try {
+            RunTimelineProjector::project($run->fresh(), $entries);
+            $queries = $connection->getQueryLog();
+        } finally {
+            $connection->disableQueryLog();
+        }
+
+        $writes = array_filter($queries, static fn (array $query): bool =>
+            str_starts_with(strtolower($query['query']), 'update')
+            && str_contains($query['query'], $row->getTable()));
+        $this->assertCount(0, $writes);
+
+        $entries[0]['recorded_at'] = '2026-09-01T12:00:00.123451Z';
+        RunTimelineProjector::project($run->fresh(), $entries);
+        $this->assertSame('2026-09-01 12:00:00.123451', $row->fresh()->getRawOriginal('recorded_at'));
+
+        $entries[0]['recorded_at'] = null;
+        RunTimelineProjector::project($run->fresh(), $entries);
+        $this->assertNull($row->fresh()->recorded_at);
+
+        $connection->flushQueryLog();
+        $connection->enableQueryLog();
+        try {
+            RunTimelineProjector::project($run->fresh(), $entries);
+            $queries = $connection->getQueryLog();
+        } finally {
+            $connection->disableQueryLog();
+        }
+        $writes = array_filter($queries, static fn (array $query): bool =>
+            str_starts_with(strtolower($query['query']), 'update')
+            && str_contains($query['query'], $row->getTable()));
+        $this->assertCount(0, $writes);
+
+        $entries[0]['recorded_at'] = '2026-09-01T12:00:00.123452Z';
+        RunTimelineProjector::project($run->fresh(), $entries);
+        $this->assertSame('2026-09-01 12:00:00.123452', $row->fresh()->getRawOriginal('recorded_at'));
     }
 
     /**

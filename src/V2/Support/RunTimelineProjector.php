@@ -19,35 +19,66 @@ final class RunTimelineProjector
      * @param list<array<string, mixed>>|null $entries
      * @return list<WorkflowTimelineEntry>
      */
-    public static function project(WorkflowRun $run, ?array $entries = null): array
+    public static function project(WorkflowRun $run, ?array $entries = null, bool $collectRows = true): array
     {
-        $entries ??= HistoryTimeline::fromHistory($run);
         $entryModel = self::entryModel();
-        $existing = $entryModel::query()->where('workflow_run_id', $run->id)->get()->keyBy('id');
         $seen = [];
         $projected = [];
 
-        foreach (array_values($entries) as $entry) {
-            $historyEventId = self::stringValue($entry['id'] ?? null);
+        // A completed long run can already have thousands of projected signal
+        // rows. Load only the existing rows for this page, and let callers that
+        // only need the durable side effect avoid retaining every saved model.
+        foreach (self::pages($entries ?? HistoryTimeline::iterateFromHistory($run)) as $page) {
+            $projectionIds = [];
 
-            if ($historyEventId === null) {
-                continue;
+            foreach ($page as $entry) {
+                $historyEventId = self::stringValue($entry['id'] ?? null);
+
+                if ($historyEventId !== null) {
+                    $projectionIds[] = self::projectionId($run->id, $historyEventId);
+                }
             }
 
-            $projectionId = self::projectionId($run->id, $historyEventId);
-            $seen[] = $projectionId;
-            $projected[] = self::upsertEntry(
-                $run,
-                $entryModel,
-                $projectionId,
-                $historyEventId,
-                $entry,
-                $existing->get($projectionId)
-            );
+            $existing = $entryModel::query()
+                ->where('workflow_run_id', $run->id)
+                ->whereIn('id', $projectionIds)
+                ->get()
+                ->keyBy('id');
+
+            foreach ($page as $entry) {
+                $historyEventId = self::stringValue($entry['id'] ?? null);
+
+                if ($historyEventId === null) {
+                    continue;
+                }
+
+                $projectionId = self::projectionId($run->id, $historyEventId);
+                $seen[] = $projectionId;
+                $row = self::upsertEntry(
+                    $run,
+                    $entryModel,
+                    $projectionId,
+                    $historyEventId,
+                    $entry,
+                    $existing->get($projectionId)
+                );
+
+                if ($collectRows) {
+                    $projected[] = $row;
+                }
+            }
+
+            unset($existing, $page);
         }
 
-        self::historyProjectionMaintenanceRole()
-            ->pruneStaleProjectionRowsForRun($entryModel, $run->id, $seen);
+        // Active histories only append. A repair pass can start with an older
+        // loaded history and finish after another process projects new events.
+        // Pruning from that older snapshot would delete the newer rows. The
+        // terminal projection reconciles stale rows once history stops growing.
+        if ($run->status->isTerminal()) {
+            self::historyProjectionMaintenanceRole()
+                ->pruneStaleProjectionRowsForRun($entryModel, $run->id, $seen);
+        }
 
         $run->unsetRelation('timelineEntries');
 
@@ -75,6 +106,54 @@ final class RunTimelineProjector
             self::projectionId($run->id, $historyEventId),
             $historyEventId,
             $entry,
+        );
+
+        $run->unsetRelation('timelineEntries');
+
+        return $row;
+    }
+
+    public static function projectSignalReceivedEvent(
+        WorkflowRun $run,
+        WorkflowHistoryEvent $event,
+    ): WorkflowTimelineEntry {
+        if ($event->workflow_run_id !== $run->id) {
+            throw new \LogicException('Timeline event must belong to the projected workflow run.');
+        }
+
+        $historyEventId = (string) $event->id;
+        $row = self::upsertEntry(
+            $run,
+            self::entryModel(),
+            self::projectionId($run->id, $historyEventId),
+            $historyEventId,
+            HistoryTimeline::fromSignalReceivedEvent($event),
+        );
+
+        $run->unsetRelation('timelineEntries');
+
+        return $row;
+    }
+
+    /**
+     * Refresh a terminal event after its worker command snapshot changes,
+     * without loading or pruning the rest of a completed run's timeline.
+     */
+    public static function projectWorkerTerminalEvent(
+        WorkflowRun $run,
+        WorkflowHistoryEvent $event,
+    ): WorkflowTimelineEntry {
+        if ($event->workflow_run_id !== $run->id) {
+            throw new \LogicException('Timeline event must belong to the projected workflow run.');
+        }
+
+        $historyEventId = (string) $event->id;
+        $row = self::upsertEntry(
+            $run,
+            self::entryModel(),
+            self::projectionId($run->id, $historyEventId),
+            $historyEventId,
+            HistoryTimeline::fromWorkerTerminalEvent($event),
         );
 
         $run->unsetRelation('timelineEntries');
@@ -163,34 +242,51 @@ final class RunTimelineProjector
         array $entry,
         ?WorkflowTimelineEntry $existing = null,
     ): WorkflowTimelineEntry {
+        $values = [
+            'workflow_run_id' => $run->id,
+            'workflow_instance_id' => $run->workflow_instance_id,
+            'history_event_id' => $historyEventId,
+            'sequence' => self::intValue($entry['sequence'] ?? null) ?? 0,
+            'type' => self::stringValue($entry['type'] ?? null) ?? 'Unknown',
+            'kind' => self::stringValue($entry['kind'] ?? null) ?? 'workflow',
+            'entry_kind' => self::stringValue($entry['entry_kind'] ?? null) ?? 'point',
+            'source_kind' => self::stringValue($entry['source_kind'] ?? null),
+            'source_id' => self::stringValue($entry['source_id'] ?? null),
+            'summary' => self::stringValue($entry['summary'] ?? null),
+            'recorded_at' => self::timestamp($entry['recorded_at'] ?? null),
+            'command_id' => self::stringValue($entry['command_id'] ?? null),
+            'command_sequence' => self::intValue($entry['command_sequence'] ?? null),
+            'task_id' => self::stringValue($entry['task_id'] ?? null),
+            'activity_execution_id' => self::stringValue($entry['activity_execution_id'] ?? null),
+            'timer_id' => self::stringValue($entry['timer_id'] ?? null),
+            'failure_id' => self::stringValue($entry['failure_id'] ?? null),
+            'payload' => self::normalizedPayload($entry),
+        ];
+
+        // MySQL normalizes JSON object key order on write. Filling the same
+        // payload again can therefore make Eloquent issue an UPDATE for every
+        // old timeline row even though its decoded value has not changed.
+        if (
+            $existing instanceof WorkflowTimelineEntry
+            && self::canonicalizeValue($existing->payload) === self::canonicalizeValue($values['payload'])
+        ) {
+            unset($values['payload']);
+        }
+
+        // PostgreSQL can omit trailing fractional zeroes when returning a
+        // timestamp. Compare the UTC instant before filling the existing row.
+        if (
+            $existing instanceof WorkflowTimelineEntry
+            && self::sameTimestamp($existing->recorded_at, $values['recorded_at'])
+        ) {
+            unset($values['recorded_at']);
+        }
+
         /** @var WorkflowTimelineEntry $row */
-        $row = IdempotentProjectionUpsert::upsert(
-            $entryModel,
-            [
-                'id' => $projectionId,
-            ],
-            [
-                'workflow_run_id' => $run->id,
-                'workflow_instance_id' => $run->workflow_instance_id,
-                'history_event_id' => $historyEventId,
-                'sequence' => self::intValue($entry['sequence'] ?? null) ?? 0,
-                'type' => self::stringValue($entry['type'] ?? null) ?? 'Unknown',
-                'kind' => self::stringValue($entry['kind'] ?? null) ?? 'workflow',
-                'entry_kind' => self::stringValue($entry['entry_kind'] ?? null) ?? 'point',
-                'source_kind' => self::stringValue($entry['source_kind'] ?? null),
-                'source_id' => self::stringValue($entry['source_id'] ?? null),
-                'summary' => self::stringValue($entry['summary'] ?? null),
-                'recorded_at' => self::timestamp($entry['recorded_at'] ?? null),
-                'command_id' => self::stringValue($entry['command_id'] ?? null),
-                'command_sequence' => self::intValue($entry['command_sequence'] ?? null),
-                'task_id' => self::stringValue($entry['task_id'] ?? null),
-                'activity_execution_id' => self::stringValue($entry['activity_execution_id'] ?? null),
-                'timer_id' => self::stringValue($entry['timer_id'] ?? null),
-                'failure_id' => self::stringValue($entry['failure_id'] ?? null),
-                'payload' => self::normalizedPayload($entry),
-            ],
-            $existing,
-        );
+        $key = [
+            'id' => $projectionId,
+        ];
+        $row = IdempotentProjectionUpsert::upsert($entryModel, $key, $values, $existing);
 
         return $row;
     }
@@ -201,6 +297,28 @@ final class RunTimelineProjector
         $role = App::make(HistoryProjectionMaintenanceRole::class);
 
         return $role;
+    }
+
+    /**
+     * @param iterable<array<string, mixed>> $entries
+     * @return \Generator<int, list<array<string, mixed>>>
+     */
+    private static function pages(iterable $entries): \Generator
+    {
+        $page = [];
+
+        foreach ($entries as $entry) {
+            $page[] = $entry;
+
+            if (count($page) === 100) {
+                yield $page;
+                $page = [];
+            }
+        }
+
+        if ($page !== []) {
+            yield $page;
+        }
     }
 
     /**
@@ -401,5 +519,15 @@ final class RunTimelineProjector
         return is_string($value) && $value !== ''
             ? Carbon::parse($value)
             : null;
+    }
+
+    private static function sameTimestamp(mixed $stored, ?CarbonInterface $projected): bool
+    {
+        if ($stored === null || $projected === null) {
+            return $stored === $projected;
+        }
+
+        return $stored instanceof CarbonInterface
+            && UtcScheduleTimestamp::databaseValue($stored) === UtcScheduleTimestamp::databaseValue($projected);
     }
 }

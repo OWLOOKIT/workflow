@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Workflow\V2\Support;
 
+use LogicException;
 use Throwable;
 use Workflow\V2\Enums\HistoryEventType;
 use Workflow\V2\Models\WorkflowHistoryEvent;
@@ -164,6 +165,74 @@ final class RunCommandContract
         }
 
         return null;
+    }
+
+    /**
+     * Reconstruct the argument order accepted at intake from an externally
+     * stored input. Only the original bytes are retained in the command.
+     *
+     * @param array<int|string, mixed> $input
+     * @return list<mixed>
+     */
+    public static function acceptedSignalArguments(WorkflowRun $run, string $signalName, array $input): array
+    {
+        $contract = self::signalContract($run, $signalName);
+
+        if ($contract === null) {
+            try {
+                $workflowClass = TypeRegistry::resolveWorkflowClass($run->workflow_class, $run->workflow_type);
+                $contract = WorkflowDefinition::signalContract($workflowClass, $signalName);
+            } catch (LogicException) {
+                // Admission already rejected named input when its contract was unavailable.
+            }
+        }
+
+        if ($contract === null) {
+            return array_is_list($input) ? array_values($input) : [$input];
+        }
+
+        $normalized = [];
+
+        if (array_is_list($input)) {
+            $offset = 0;
+
+            foreach ($contract['parameters'] as $parameter) {
+                if (($parameter['variadic'] ?? false) === true) {
+                    array_push($normalized, ...array_slice($input, $offset));
+
+                    break;
+                }
+
+                if (array_key_exists($offset, $input)) {
+                    $normalized[] = $input[$offset++];
+                } elseif (($parameter['default_available'] ?? false) === true) {
+                    $normalized[] = $parameter['default'] ?? null;
+                }
+            }
+
+            return $normalized;
+        }
+
+        foreach ($contract['parameters'] as $parameter) {
+            $name = $parameter['name'];
+
+            if (($parameter['variadic'] ?? false) === true) {
+                if (array_key_exists($name, $input)) {
+                    $values = $input[$name];
+                    array_push($normalized, ...(is_array($values) ? array_values($values) : [$values]));
+                }
+
+                continue;
+            }
+
+            if (array_key_exists($name, $input)) {
+                $normalized[] = $input[$name];
+            } elseif (($parameter['default_available'] ?? false) === true) {
+                $normalized[] = $parameter['default'] ?? null;
+            }
+        }
+
+        return $normalized;
     }
 
     public static function hasUpdateMethod(WorkflowRun $run, string $method): bool

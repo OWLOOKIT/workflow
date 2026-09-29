@@ -1391,13 +1391,20 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
 
         $parallelPath = ParallelChildGroup::metadataPathFromPayload($openedPayload);
         $parallelMetadata = ParallelChildGroup::payloadForPath($parallelPath);
+        $payloadCodec = $run->payload_codec ?? CodecRegistry::defaultCodec();
+        $namespace = is_string($run->namespace) ? $run->namespace : null;
+        $storedValue = ExternalPayloads::externalizeForNamespace(
+            Serializer::serializeWithCodec($payloadCodec, $value),
+            $payloadCodec,
+            $namespace,
+        );
         $appliedEvent = WorkflowHistoryEvent::record($run, HistoryEventType::SignalApplied, array_filter([
             'workflow_command_id' => $signal->workflow_command_id,
             'signal_id' => $signal->id,
             'signal_name' => $signalName,
             'signal_wait_id' => $signalWaitId,
             'sequence' => $sequence,
-            'value' => Serializer::serializeWithCodec($run->payload_codec ?? CodecRegistry::defaultCodec(), $value),
+            'value' => ExternalPayloads::historyValue($storedValue, $payloadCodec, $namespace),
             ...$parallelMetadata,
         ], static fn (mixed $payloadValue): bool => $payloadValue !== null), $task, $command);
         ParallelChildGroup::claimSelectionWinner($run, $parallelPath, 'signal', $appliedEvent);
@@ -2214,7 +2221,9 @@ final class DefaultWorkflowTaskBridge implements WorkflowTaskBridge
             return $arguments;
         }
 
-        $arguments = array_values($arguments);
+        $arguments = is_string($signal->arguments) && ExternalPayloads::isStoredReference($signal->arguments)
+            ? RunCommandContract::acceptedSignalArguments($run, $signal->signal_name, $arguments)
+            : array_values($arguments);
 
         if ($arguments === []) {
             return true;

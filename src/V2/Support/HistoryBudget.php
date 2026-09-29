@@ -115,6 +115,16 @@ final class HistoryBudget
         return self::summarize(max(0, $historyEventCount), max(0, $historySizeBytes), max(0, $historyFanOut));
     }
 
+    public static function hasCompleteSummary(WorkflowRun $run, WorkflowRunSummary $summary): bool
+    {
+        return self::summaryIsComplete($run, $summary);
+    }
+
+    public static function sizeOfEvent(WorkflowHistoryEvent $event): int
+    {
+        return self::eventSizeBytes($event);
+    }
+
     public static function eventHardThreshold(): int
     {
         return self::positiveIntegerConfig(

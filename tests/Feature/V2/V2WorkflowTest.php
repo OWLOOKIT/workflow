@@ -7,6 +7,7 @@ namespace Tests\Feature\V2;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Str;
 use LogicException;
@@ -15,10 +16,12 @@ use Symfony\Component\Process\Process;
 use Tests\Fixtures\V2\TestAsyncGeneratorCallbackWorkflow;
 use Tests\Fixtures\V2\TestAsyncWorkflow;
 use Tests\Fixtures\V2\TestBroadFailureCatchWorkflow;
+use Tests\Fixtures\V2\TestBufferedSignalHistoryWorkflow;
 use Tests\Fixtures\V2\TestConfiguredContinueSignalWorkflow;
 use Tests\Fixtures\V2\TestConfiguredGreetingActivity;
 use Tests\Fixtures\V2\TestConfiguredGreetingWorkflow;
 use Tests\Fixtures\V2\TestContinueAsNewWorkflow;
+use Tests\Fixtures\V2\TestExternalSignalArgumentsWorkflow;
 use Tests\Fixtures\V2\TestFailingWorkflow;
 use Tests\Fixtures\V2\TestFiberParallelWorkflow;
 use Tests\Fixtures\V2\TestFiberSignalWorkflow;
@@ -62,6 +65,8 @@ use Workflow\Serializers\AvroValueJsonProjection;
 use Workflow\Serializers\Serializer;
 use Workflow\V2\ActivityTaskBridge;
 use Workflow\V2\AsyncWorkflow;
+use Workflow\V2\Contracts\ExternalPayloadStorageDriver;
+use Workflow\V2\Contracts\ExternalPayloadStoragePolicy;
 use Workflow\V2\Contracts\HistoryProjectionRole;
 use Workflow\V2\Enums\ActivityStatus;
 use Workflow\V2\Enums\FailureCategory;
@@ -85,6 +90,7 @@ use Workflow\V2\Models\WorkflowRun;
 use Workflow\V2\Models\WorkflowRunSummary;
 use Workflow\V2\Models\WorkflowSignal;
 use Workflow\V2\Models\WorkflowTask;
+use Workflow\V2\Models\WorkflowTimelineEntry;
 use Workflow\V2\Models\WorkflowTimer;
 use Workflow\V2\StartOptions;
 use Workflow\V2\Support\ActivityCall;
@@ -92,15 +98,21 @@ use Workflow\V2\Support\ActivityCancellation;
 use Workflow\V2\Support\ActivityLease;
 use Workflow\V2\Support\DefaultHistoryProjectionRole;
 use Workflow\V2\Support\EmbeddedV2HistoryImport;
+use Workflow\V2\Support\ExternalPayloads;
 use Workflow\V2\Support\FailureSnapshots;
+use Workflow\V2\Support\HistoryBudget;
 use Workflow\V2\Support\HistoryExport;
+use Workflow\V2\Support\LocalFilesystemExternalPayloadStorage;
 use Workflow\V2\Support\MemoPayload;
 use Workflow\V2\Support\MemoUpsertService;
 use Workflow\V2\Support\QueryStateReplayer;
+use Workflow\V2\Support\RunCommandContract;
 use Workflow\V2\Support\RunDetailView;
 use Workflow\V2\Support\RunSummaryProjector;
 use Workflow\V2\Support\RunSummarySortKey;
+use Workflow\V2\Support\RunTimelineProjector;
 use Workflow\V2\Support\RuntimeObjectFactory;
+use Workflow\V2\Support\RunWaitProjector;
 use Workflow\V2\Support\SelectedRunLocator;
 use Workflow\V2\Support\UpsertMemosCall;
 use Workflow\V2\Support\WorkflowInstanceId;
@@ -5122,6 +5134,153 @@ final class V2WorkflowTest extends TestCase
         ], $workflow->output());
     }
 
+    public function testAcceptedExternalSignalCommandRetainsReferenceInsteadOfDecodedArguments(): void
+    {
+        Queue::fake();
+
+        $root = sys_get_temp_dir() . '/dw-external-signal-' . bin2hex(random_bytes(6));
+        $driver = new LocalFilesystemExternalPayloadStorage($root);
+        $this->app->instance(ExternalPayloadStoragePolicy::class, new class(
+            $driver
+        ) implements ExternalPayloadStoragePolicy {
+            public function __construct(
+                private readonly ExternalPayloadStorageDriver $driver
+            ) {
+            }
+
+            public function driverFor(?string $namespace): ?ExternalPayloadStorageDriver
+            {
+                return $this->driver;
+            }
+
+            public function thresholdBytesFor(?string $namespace): ?int
+            {
+                return 32;
+            }
+        });
+
+        try {
+            $workflow = WorkflowStub::make(
+                TestExternalSignalArgumentsWorkflow::class,
+                'signal-external-command-instance'
+            );
+            $workflow->start();
+            $this->drainReadyTasks();
+            $this->waitFor(static fn (): bool => $workflow->refresh()->status() === 'waiting'
+                && $workflow->summary()?->wait_kind === 'signal');
+
+            $name = str_repeat('S', 2048);
+            $serialized = Serializer::serializeWithCodec('avro', [
+                'second' => $name,
+                'first' => 'first-value',
+            ]);
+            $stored = ExternalPayloads::externalizeForNamespace($serialized, 'avro', 'default');
+            $reference = ExternalPayloads::storedEnvelope($stored);
+            $this->assertIsArray($reference);
+
+            $result = $workflow->attemptSignalWithArguments('pair', [
+                'second' => $name,
+                'first' => 'first-value',
+            ], 'avro', $stored);
+            $this->assertTrue($result->accepted());
+
+            $command = WorkflowCommand::query()->findOrFail($result->commandId());
+            $signal = WorkflowSignal::query()->where('workflow_command_id', $command->id)->sole();
+            $received = WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $workflow->runId())
+                ->where('event_type', HistoryEventType::SignalReceived->value)
+                ->sole();
+
+            $this->assertSame($stored, $command->payload);
+            $this->assertSame('pair', $command->targetName());
+            $this->assertSame($stored, $signal->arguments);
+            $this->assertSame(
+                $reference['external_storage']['sha256'],
+                $received->payload['arguments']['external_storage']['sha256'],
+            );
+            $this->assertLessThan(1024, strlen($command->payload));
+            $this->assertStringNotContainsString($serialized, json_encode($received->payload, JSON_THROW_ON_ERROR));
+
+            $this->drainReadyTasks();
+            $this->waitFor(static fn (): bool => $workflow->refresh()->completed());
+            $this->assertSame(['first-value', $name], $workflow->output()['result']);
+            $this->assertNotNull($command->fresh()->applied_at);
+
+            $applied = WorkflowHistoryEvent::query()
+                ->where('workflow_run_id', $workflow->runId())
+                ->where('event_type', HistoryEventType::SignalApplied->value)
+                ->sole();
+            $this->assertArrayHasKey('external_storage', $applied->payload['value']);
+            $this->assertStringNotContainsString($name, json_encode($applied->payload, JSON_THROW_ON_ERROR));
+        } finally {
+            File::deleteDirectory($root);
+        }
+    }
+
+    public function testExternalSignalArgumentsRetainAcceptedDefaultsAndVariadicOrder(): void
+    {
+        Queue::fake();
+
+        $workflow = WorkflowStub::make(TestExternalSignalArgumentsWorkflow::class, 'external-signal-contract');
+        $workflow->start();
+        $run = WorkflowRun::query()->findOrFail($workflow->runId());
+
+        $this->assertSame(
+            ['first-value', 'default-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'first' => 'first-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'second-value', 'third-value', 'fourth-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'rest' => ['third-value', 'fourth-value'],
+                'second' => 'second-value',
+                'first' => 'first-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'default-value', 'third-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'first' => 'first-value',
+                'rest' => 'third-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'default-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', ['first-value']),
+        );
+        $this->assertSame(
+            ['first-value', 'second-value', 'third-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'batch', [
+                'first-value',
+                'second-value',
+                'third-value',
+            ]),
+        );
+        $this->assertSame(
+            ['first-value', 'second-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'undeclared', ['first-value', 'second-value']),
+        );
+        $this->assertSame(
+            [[
+                'first' => 'first-value',
+            ]],
+            RunCommandContract::acceptedSignalArguments($run, 'undeclared', [
+                'first' => 'first-value',
+            ]),
+        );
+
+        $run->forceFill([
+            'workflow_class' => 'Missing\\ExternalSignalWorkflow',
+            'workflow_type' => 'missing-external-signal-workflow',
+        ])->save();
+        $this->assertSame(
+            ['first-value'],
+            RunCommandContract::acceptedSignalArguments($run, 'undeclared', ['first-value']),
+        );
+    }
+
     public function testSignalCommandRejectsInvalidNamedArgumentsAgainstDeclaredContract(): void
     {
         Queue::fake();
@@ -5357,6 +5516,81 @@ final class V2WorkflowTest extends TestCase
             ->orderBy('sequence')
             ->pluck('workflow_command_id')
             ->all());
+    }
+
+    public function testManyBufferedSignalsSurviveWorkerResumeWithExactHistory(): void
+    {
+        Queue::fake();
+        $signalCount = 60;
+
+        $workflow = WorkflowStub::make(TestBufferedSignalHistoryWorkflow::class, 'many-buffered-signals');
+        $workflow->start($signalCount);
+        $runId = $workflow->runId();
+
+        $this->assertNotNull($runId);
+        $this->drainReadyTasks();
+
+        for ($index = 0; $index < $signalCount; $index++) {
+            $this->assertTrue($workflow->signal('append', (string) $index)->accepted());
+        }
+
+        $this->assertSame($signalCount, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $runId)
+            ->where('event_type', HistoryEventType::SignalReceived->value)
+            ->count());
+        $this->assertSame($signalCount + 3, $workflow->summary()?->history_event_count);
+        $run = WorkflowRun::query()->findOrFail($runId);
+        $this->assertSame(HistoryBudget::forRun($run)['history_size_bytes'], $workflow->summary()?->history_size_bytes);
+        $this->assertFalse(RunTimelineProjector::driftStatusForRun($run)['stale']);
+        $this->assertFalse(RunWaitProjector::driftStatusForRun($run)['stale']);
+        $detail = RunDetailView::forRun($run);
+        $this->assertCount($signalCount + 3, $detail['timeline']);
+        $this->assertCount($signalCount, array_filter(
+            $detail['timeline'],
+            static fn (array $event): bool => ($event['type'] ?? null) === HistoryEventType::SignalReceived->value
+        ));
+
+        $this->drainReadyTasks();
+        $workflow->refresh();
+
+        $this->assertTrue($workflow->completed());
+        $this->assertSame(array_map(strval(...), range(0, $signalCount - 1)), $workflow->output());
+        $this->assertSame($signalCount, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $runId)
+            ->where('event_type', HistoryEventType::SignalApplied->value)
+            ->count());
+        $this->assertSame(1, WorkflowHistoryEvent::query()
+            ->where('workflow_run_id', $runId)
+            ->where('event_type', HistoryEventType::WorkflowCompleted->value)
+            ->count());
+    }
+
+    public function testBufferedSignalRefreshesOverdueTaskDiagnostics(): void
+    {
+        Queue::fake();
+        $startedAt = Carbon::parse('2026-09-28 12:00:00');
+        Carbon::setTestNow($startedAt);
+
+        try {
+            $workflow = WorkflowStub::make(TestBufferedSignalHistoryWorkflow::class, 'buffered-signal-diagnostics');
+            $workflow->start(3);
+            $this->drainReadyTasks();
+
+            $this->assertTrue($workflow->signal('append', 'first')->accepted());
+            $this->assertTrue($workflow->signal('append', 'second')->accepted());
+
+            Carbon::setTestNow($startedAt->copy()->addSeconds(10));
+            $this->assertTrue($workflow->signal('append', 'third')->accepted());
+
+            $summary = $workflow->summary();
+            $this->assertSame('repair_needed', $summary?->liveness_state);
+            $this->assertTrue($summary?->task_problem);
+            $projected = RunSummaryProjector::project(WorkflowRun::query()->findOrFail($workflow->runId()));
+            $this->assertSame($projected->liveness_state, $summary->liveness_state);
+            $this->assertSame($projected->task_problem, $summary->task_problem);
+        } finally {
+            Carbon::setTestNow();
+        }
     }
 
     public function testBufferedSameNamedSignalsKeepDurableWaitIdsBeforeLaterWaitsOpen(): void
@@ -6296,13 +6530,47 @@ final class V2WorkflowTest extends TestCase
             'queue' => 'default',
         ]);
 
+        foreach (range(1, 5) as $sequence) {
+            WorkflowHistoryEvent::query()->create([
+                'workflow_run_id' => $run->id,
+                'sequence' => $sequence,
+                'event_type' => HistoryEventType::SignalReceived,
+                'payload' => [
+                    'signal_name' => 'probe',
+                    'arguments' => [$sequence],
+                ],
+                'recorded_at' => now(),
+            ]);
+        }
+        $run->forceFill([
+            'last_history_sequence' => 5,
+        ])->save();
+
         RunSummaryProjector::project(
             $run->fresh(['instance', 'tasks', 'activityExecutions', 'timers', 'failures', 'historyEvents'])
         );
 
         $this->assertSame('repair_needed', WorkflowRunSummary::query()->findOrFail($run->id)->liveness_state);
+        $this->assertSame(5, WorkflowTimelineEntry::query()->where('workflow_run_id', $run->id)->count());
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
 
         $this->wakeTaskWatchdog();
+
+        $queries = DB::getQueryLog();
+        DB::disableQueryLog();
+        DB::flushQueryLog();
+        $timelineQueries = array_values(array_filter(
+            $queries,
+            static fn (array $query): bool => str_contains($query['query'], 'workflow_run_timeline_entries'),
+        ));
+        $timelineWrites = array_values(array_filter(
+            $timelineQueries,
+            static fn (array $query): bool => preg_match('/^(update|insert|delete)\b/i', trim($query['query'])) === 1,
+        ));
+        $this->assertSame([], $timelineWrites, 'Redispatch should not rewrite timeline rows.');
+        $this->assertLessThanOrEqual(2, count($timelineQueries), 'Redispatch should not add a full timeline scan.');
 
         $task->refresh();
 
