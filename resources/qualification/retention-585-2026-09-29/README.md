@@ -20,3 +20,7 @@ The baseline ran the probe with the published packages after `php artisan migrat
 | Waterline archive timestamp | 09:59 UTC winter, 08:59 UTC summer | Same; tracked separately in [#588](https://github.com/durable-workflow/workflow/issues/588) |
 
 The repository regression in `V2WorkflowRunRetentionCleanupTest` additionally covers UTC, both Kyiv seasonal offsets, the instants immediately before and after both 2026 daylight-saving transitions, repeated pruning, raw archive metadata preservation, and terminal status. The full file passed on PostgreSQL 17: 6 tests, 140 assertions. This probe exercises Waterline's resource serialization and its display formatter logic; it does not launch a browser.
+
+## Published 2.2.19 verification
+
+The same probe ran on a fresh isolated PostgreSQL 17 database with published Workflow 2.2.19 (Composer dist reference `6671beba3309858c3787ec0f509301b65c4a341b`) and published Waterline 2.0.7. No source overlay was mounted. The unedited output is `retention/probe.json` in the [published evidence archive](https://github.com/durable-workflow/workflow/releases/download/2.2.19/schedule-561-retention-published-2219.tar.gz). Winter and summer both retain the exact 12:00 UTC pruning instant in the raw database value, hydrated Workflow model, and Waterline resource. Both `timestamp_matches` values are true. The completed and failed statuses remain intact, and each run has zero retained history events and exceptions. The distinct `archived_at` display offset remains tracked in #588.
