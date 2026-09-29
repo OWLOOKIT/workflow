@@ -9,6 +9,13 @@
   leases were never repaired and activity timeouts never enforced. Behaviour
   on the default connection is unchanged.
 
+## 2.2.20 - 2026-09-29
+
+- Preserve UTC archive instants when hydrating workflow runs and their summaries
+  in applications with a non-UTC timezone. Archive commands read the UTC clock
+  explicitly, and archive timestamps retain microseconds and their original
+  metadata across repeated commands.
+
 ## 2.0.17 - 2026-09-22
 
 - Resolve a committed caller-supplied workflow identity from a current MySQL

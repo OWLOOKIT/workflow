@@ -46,7 +46,11 @@ final class V2ArchiveWorkflowTest extends TestCase
                     $run = $this->createRun('archive-timezone-' . Str::ulid(), (string) Str::ulid(), 'completed');
                     $result = WorkflowStub::loadRun($run->id)->attemptArchive('UTC archive qualification');
                     $this->assertTrue($result->accepted());
-                    $this->assertSame($expected->format('U.u'), $run->fresh()->archived_at->format('U.u'));
+                    $this->assertSame(
+                        $expected->format('U.u'),
+                        $run->fresh()->archived_at->format('U.u'),
+                        $timezone . ' ' . $instant
+                    );
                     $this->assertSame(
                         $expected->format('U.u'),
                         WorkflowRunSummary::query()->findOrFail($run->id)->archived_at->format('U.u')

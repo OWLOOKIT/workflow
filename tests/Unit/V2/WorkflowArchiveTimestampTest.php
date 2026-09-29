@@ -28,6 +28,7 @@ final class WorkflowArchiveTimestampTest extends TestCase
                 date_default_timezone_set($timezone);
                 foreach ($instants as $instant) {
                     $expected = Carbon::parse($instant, 'UTC');
+                    Carbon::setTestNow($expected);
                     $raw = $expected->format('Y-m-d H:i:s.u');
                     foreach ([WorkflowRun::class, WorkflowRunSummary::class] as $modelClass) {
                         $model = new $modelClass();
@@ -54,6 +55,7 @@ final class WorkflowArchiveTimestampTest extends TestCase
                 }
             }
         } finally {
+            Carbon::setTestNow();
             date_default_timezone_set($originalTimezone);
         }
     }
