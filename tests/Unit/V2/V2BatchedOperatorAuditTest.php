@@ -104,6 +104,71 @@ final class V2BatchedOperatorAuditTest extends TestCase
         });
     }
 
+    public function testDashboardAndHealthReuseOneAuditWithExplicitTimePreserved(): void
+    {
+        \Workflow\V2\Support\OperatorMetrics::collectOnce(function (): void {
+            $dashboard = \Workflow\V2\Support\OperatorDashboardSummary::snapshot(namespace: 'empty');
+            $queries = 0;
+            DB::listen(static function () use (&$queries): void {
+                $queries++;
+            });
+            $health = \Workflow\V2\Support\HealthCheck::snapshot(namespace: 'empty');
+            $this->assertSame($dashboard['operator_metrics'], $health['operator_metrics']);
+            $this->assertSame(0, $queries);
+
+            $reference = \Carbon\CarbonImmutable::parse('2026-01-02T03:04:05Z');
+            $explicit = \Workflow\V2\Support\OperatorDashboardSummary::snapshot($reference, 'empty');
+            $this->assertSame($reference->toJSON(), $explicit['operator_metrics']['generated_at']);
+            $this->assertCount(169, $explicit['fleet_trends_series']['timestamps']);
+            $this->assertSame(
+                $reference->copy()
+                    ->subWeek()
+                    ->startOfHour()
+->timestamp * 1000,
+                $explicit['fleet_trends_series']['timestamps'][0]
+            );
+            $this->assertSame(
+                $reference->copy()
+                    ->startOfHour()
+->timestamp * 1000,
+                $explicit['fleet_trends_series']['timestamps'][168]
+            );
+            $before = $queries;
+            $this->assertSame(
+                $explicit['operator_metrics'],
+                \Workflow\V2\Support\HealthCheck::snapshot($reference, 'empty')['operator_metrics']
+            );
+            $this->assertSame($before, $queries);
+        });
+    }
+
+    public function testDefaultDashboardPreservesCollectionTimezone(): void
+    {
+        $timezone = date_default_timezone_get();
+        $reference = \Carbon\CarbonImmutable::parse('2026-01-02 03:04:05', 'Asia/Kolkata');
+        date_default_timezone_set('Asia/Kolkata');
+        $this->travelTo($reference);
+        try {
+            \Workflow\V2\Support\OperatorMetrics::collectOnce(function () use ($reference): void {
+                $dashboard = \Workflow\V2\Support\OperatorDashboardSummary::snapshot(namespace: 'empty');
+                $this->assertSame(
+                    $reference->subWeek()
+                        ->startOfHour()
+->timestamp * 1000,
+                    $dashboard['fleet_trends_series']['timestamps'][0]
+                );
+                $this->assertSame(
+                    $reference->startOfHour()
+->timestamp * 1000,
+                    $dashboard['fleet_trends_series']['timestamps'][168]
+                );
+            });
+        } finally {
+            $this->travelBack();
+            date_default_timezone_set($timezone);
+        }
+    }
+
     public function testCommandPayloadHandlesPartiallyLoadedRun(): void
     {
         config()->set('queue.default', 'redis');

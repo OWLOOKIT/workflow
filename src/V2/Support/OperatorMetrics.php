@@ -56,11 +56,19 @@ final class OperatorMetrics
     }
 
     /**
+     * Preserve the caller's time or the active collection's clock and timezone.
+     */
+    public static function referenceTime(?CarbonInterface $now = null): CarbonInterface
+    {
+        return $now ?? self::$collectionTime ?? now();
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public static function snapshot(?CarbonInterface $now = null, ?string $namespace = null): array
     {
-        $now = $now ?? self::$collectionTime ?? now();
+        $now = self::referenceTime($now);
         $namespace = self::normalizeNamespace($namespace);
 
         $key = json_encode([$namespace, $now->toJSON()], JSON_THROW_ON_ERROR);

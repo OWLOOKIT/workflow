@@ -18,8 +18,9 @@ final class OperatorDashboardSummary
      */
     public static function snapshot(?CarbonInterface $now = null, ?string $namespace = null): array
     {
-        $now ??= now();
         $namespace = self::normalizeNamespace($namespace);
+        $now = OperatorMetrics::referenceTime($now);
+        $metrics = OperatorMetrics::snapshot($now, $namespace);
         $flowsPastHour = self::flowsPastHour($now, $namespace);
 
         return [
@@ -35,7 +36,7 @@ final class OperatorDashboardSummary
             'workflow_type_health' => self::workflowTypeHealth($now, $namespace),
             'needs_attention' => self::needsAttention($now, $namespace),
             'fleet_trends_series' => self::fleetTrendsSeries($now, $namespace),
-            'operator_metrics' => OperatorMetrics::snapshot($now, $namespace),
+            'operator_metrics' => $metrics,
         ];
     }
 
@@ -89,7 +90,7 @@ final class OperatorDashboardSummary
             $series['completed'][] = $hourCounts[$hourKey]['completed'] ?? 0;
             $series['failed'][] = $hourCounts[$hourKey]['failed'] ?? 0;
 
-            $current->addHour();
+            $current = $current->addHour();
         }
 
         return $series;
