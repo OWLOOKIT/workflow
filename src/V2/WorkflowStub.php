@@ -1959,7 +1959,7 @@ final class WorkflowStub
 
             if (! $alreadyArchived) {
                 $run->forceFill([
-                    'archived_at' => now(),
+                    'archived_at' => now('UTC'),
                     'archive_command_id' => $command->id,
                     'archive_reason' => $reason,
                     'last_progress_at' => now(),
