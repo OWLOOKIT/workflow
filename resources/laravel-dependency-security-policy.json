@@ -23,15 +23,25 @@
       "disposition": "accepted-risk"
     },
     "12": {
-      "minimum": "12.61.1",
+      "minimum": "12.69.0",
       "disposition": "secure"
     },
     "13": {
-      "minimum": "13.12.0",
+      "minimum": "13.30.0",
       "disposition": "secure"
     }
   },
   "accepted_advisories": {
+    "PKSA-d5tc-s1qs-h781": {
+      "github_advisory": "GHSA-jh5r-qr3c-85q8",
+      "affected_supported_majors": [
+        "9",
+        "10",
+        "11"
+      ],
+      "review_by": "2026-11-24",
+      "reason": "Laravel has not published a patch on these legacy majors. Compatibility is retained for embedded upgrade and drain paths; production applications must disable APP_DEBUG and migrate to a patched Laravel 12 or 13 release."
+    },
     "PKSA-m5cs-t1y6-qpcs": {
       "github_advisory": "GHSA-crmm-hgp2-wgrp",
       "affected_supported_majors": [

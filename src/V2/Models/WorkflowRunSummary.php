@@ -12,6 +12,7 @@ use Workflow\V2\Enums\RunStatus;
 use Workflow\V2\Support\ConfiguredV2Models;
 use Workflow\V2\Support\RepairBlockedReason;
 use Workflow\V2\Support\SearchAttributeValueFilter;
+use Workflow\V2\Support\UtcScheduleTimestamp;
 use Workflow\V2\Support\WorkflowTaskProblem;
 
 class WorkflowRunSummary extends Model
@@ -51,7 +52,7 @@ class WorkflowRunSummary extends Model
         'started_at' => 'datetime',
         'sort_timestamp' => 'datetime',
         'closed_at' => 'datetime',
-        'archived_at' => 'datetime',
+        'archived_at' => UtcScheduleTimestamp::class,
         'wait_started_at' => 'datetime',
         'wait_deadline_at' => 'datetime',
         'next_task_at' => 'datetime',
