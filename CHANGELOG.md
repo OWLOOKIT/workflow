@@ -11,6 +11,9 @@
 
 ## 2.2.20 - 2026-09-29
 
+- Require patched Laravel 12.69.0 or 13.30.0 minimums for the current framework
+  lines. The existing legacy upgrade policy tracks the debug-page XSS advisory
+  on Laravel 9 through 11, where an upstream patch is unavailable.
 - Preserve UTC archive instants when hydrating workflow runs and their summaries
   in applications with a non-UTC timezone. Archive commands read the UTC clock
   explicitly, and archive timestamps retain microseconds and their original

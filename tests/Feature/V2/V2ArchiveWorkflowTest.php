@@ -48,7 +48,8 @@ final class V2ArchiveWorkflowTest extends TestCase
                     $this->assertTrue($result->accepted());
                     $this->assertSame(
                         $expected->format('U.u'),
-                        $run->fresh()->archived_at->format('U.u'),
+                        $run->fresh()
+                            ->archived_at->format('U.u'),
                         $timezone . ' ' . $instant
                     );
                     $this->assertSame(
